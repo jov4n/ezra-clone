@@ -27,10 +27,12 @@ services:
     ports:
       - "4000:4000"
     command: >
-      --api_base https://openrouter.ai/api/v1
+      --config /app/config.yaml
       --drop_params
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 30s

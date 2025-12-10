@@ -139,9 +139,100 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 		zap.Bool("is_dm", isDM),
 	)
 
-	// Check for language preference instructions before processing
 	ctx := context.Background()
-	handleLanguagePreferenceInstruction(ctx, s, m, content, graphRepo, log)
+
+	// Ensure message author exists in database before processing
+	_, err := graphRepo.GetOrCreateUser(ctx, m.Author.ID, m.Author.ID, m.Author.Username, "discord")
+	if err != nil {
+		log.Error("Failed to get/create user",
+			zap.String("user_id", m.Author.ID),
+			zap.Error(err),
+		)
+		// Continue anyway - user creation failure shouldn't block message processing
+	}
+
+	// Create users for any mentioned users (even if they haven't talked yet)
+	for _, mention := range m.Mentions {
+		// Skip bot mentions
+		if mention.ID == s.State.User.ID {
+			continue
+		}
+		
+		// Create the mentioned user if they don't exist
+		_, err := graphRepo.GetOrCreateUser(ctx, mention.ID, mention.ID, mention.Username, "discord")
+		if err != nil {
+			log.Warn("Failed to get/create mentioned user",
+				zap.String("user_id", mention.ID),
+				zap.String("username", mention.Username),
+				zap.Error(err),
+			)
+			// Continue - don't block on mentioned user creation failure
+		} else {
+			log.Debug("Created/updated mentioned user",
+				zap.String("user_id", mention.ID),
+				zap.String("username", mention.Username),
+			)
+		}
+	}
+
+	// Also try to resolve text-based username mentions (e.g., "@bash wizard" in text)
+	// Extract username patterns from message content
+	usernamePattern := regexp.MustCompile(`@(\w+(?:\s+\w+)?)`)
+	matches := usernamePattern.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			username := strings.TrimSpace(match[1])
+			// Skip if it's a Discord ID mention (numeric)
+			if matched, _ := regexp.MatchString(`^\d+$`, username); matched {
+				continue
+			}
+			
+			// Try to find this user in the guild/server
+			if m.GuildID != "" {
+				members, err := s.GuildMembersSearch(m.GuildID, username, 5)
+				if err == nil && len(members) > 0 {
+					// Found user(s) - create the first match
+					for _, member := range members {
+						if member.User != nil && !member.User.Bot {
+							_, err := graphRepo.GetOrCreateUser(ctx, member.User.ID, member.User.ID, member.User.Username, "discord")
+							if err != nil {
+								log.Warn("Failed to get/create text-mentioned user",
+									zap.String("user_id", member.User.ID),
+									zap.String("username", member.User.Username),
+									zap.String("searched_username", username),
+									zap.Error(err),
+								)
+							} else {
+								log.Debug("Created/updated text-mentioned user",
+									zap.String("user_id", member.User.ID),
+									zap.String("username", member.User.Username),
+									zap.String("searched_username", username),
+								)
+							}
+							break // Only create the first match
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check for language preference instructions before processing
+	languagePreferenceSet, targetUserForLang := handleLanguagePreferenceInstruction(ctx, s, m, content, graphRepo, log)
+
+	// If language preference was set, send confirmation and skip LLM processing
+	if languagePreferenceSet && targetUserForLang != "" {
+		langName := getLanguageNameFromCode(extractLanguageFromMessage(content))
+		confirmationMsg := fmt.Sprintf("✅ I've noted that %s prefers %s!", targetUserForLang, langName)
+		_, _ = s.ChannelMessageSend(m.ChannelID, confirmationMsg)
+		return
+	} else if languagePreferenceSet {
+		// Language preference set for requester
+		langName := getLanguageNameFromCode(extractLanguageFromMessage(content))
+		confirmationMsg := fmt.Sprintf("✅ I've noted that you prefer %s! I'll respond in %s from now on.", langName, langName)
+		_, _ = s.ChannelMessageSend(m.ChannelID, confirmationMsg)
+		return
+	}
 
 	// Run agent turn with full context
 	agentID := "Ezra" // Default agent ID
@@ -162,6 +253,12 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 			zap.Error(err),
 			zap.String("user_id", m.Author.ID),
 		)
+
+		// If language preference was set but LLM failed, at least acknowledge that
+		if languagePreferenceSet {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "✅ Language preference has been set! However, I encountered an error generating a response. Please check your API configuration.")
+			return
+		}
 
 		// Optionally notify user of error
 		_, _ = s.ChannelMessageSend(m.ChannelID, "Sorry, I encountered an error processing your message.")
@@ -373,8 +470,36 @@ func getLanguageNameFromCode(langCode string) string {
 	return langCode // Return code if name not found
 }
 
+// extractLanguageFromMessage extracts the language code from a message
+func extractLanguageFromMessage(content string) string {
+	lowerContent := strings.ToLower(content)
+	languagePatterns := map[string][]string{
+		"fr":        {"france", "speak french", "respond in french", "lang=fr", "language=french", "only speaks french", "only speak french"},
+		"en":        {"english", "speak english", "respond in english", "lang=en", "language=english", "preferred language is english", "prefers to speak in english"},
+		"pig_latin": {"pig latin", "speaks pig latin", "only speaks pig latin", "only speak pig latin"},
+		"es":        {"spanish", "speaks spanish", "only speaks spanish", "only speak spanish", "lang=es"},
+		"de":        {"german", "speaks german", "only speaks german", "only speak german", "lang=de"},
+		"it":        {"italian", "speaks italian", "only speaks italian", "only speak italian", "lang=it"},
+		"pt":        {"portuguese", "speaks portuguese", "only speaks portuguese", "only speak portuguese", "lang=pt"},
+		"ja":        {"japanese", "speaks japanese", "only speaks japanese", "only speak japanese", "lang=ja"},
+		"zh":        {"chinese", "speaks chinese", "only speaks chinese", "only speak chinese", "lang=zh"},
+		"ko":        {"korean", "speaks korean", "only speaks korean", "only speak korean", "lang=ko"},
+		"ru":        {"russian", "speaks russian", "only speaks russian", "only speak russian", "lang=ru"},
+	}
+	
+	for langCode, patterns := range languagePatterns {
+		for _, pattern := range patterns {
+			if strings.Contains(lowerContent, pattern) {
+				return langCode
+			}
+		}
+	}
+	return ""
+}
+
 // handleLanguagePreferenceInstruction detects and processes language preference instructions
-func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate, content string, graphRepo *graph.Repository, log *zap.Logger) {
+// Returns (success bool, targetUsername string) - targetUsername is empty if set for requester
+func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate, content string, graphRepo *graph.Repository, log *zap.Logger) (bool, string) {
 	// Normalize content for pattern matching
 	lowerContent := strings.ToLower(content)
 
@@ -414,8 +539,13 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 	}
 
 	if detectedLang == "" {
-		return
+		return false, ""
 	}
+
+	log.Debug("Language preference detected",
+		zap.String("language", detectedLang),
+		zap.String("content", content),
+	)
 
 	// Extract target user - prioritize mentioned users
 	var targetUsername string
@@ -423,28 +553,69 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 
 	// First, check if there are any user mentions (excluding the bot)
 	// If there are mentions, use the first mentioned user as the target
+	log.Debug("Checking mentions",
+		zap.Int("mention_count", len(m.Mentions)),
+		zap.String("bot_id", s.State.User.ID),
+	)
+	
 	for _, mention := range m.Mentions {
+		log.Debug("Processing mention",
+			zap.String("mention_id", mention.ID),
+			zap.String("mention_username", mention.Username),
+			zap.Bool("is_bot", mention.ID == s.State.User.ID),
+		)
 		if mention.ID != s.State.User.ID {
 			// Found a mentioned user - this is our target
 			targetUserID = mention.ID
 			targetUsername = mention.Username
+			log.Info("Found target user from mentions",
+				zap.String("user_id", targetUserID),
+				zap.String("username", targetUsername),
+			)
 			break
 		}
 	}
 
 	// If no mentions found, try to extract username from text patterns
 	if targetUserID == "" {
-		// Pattern: "never forget that @bash wizard" or "never forget that bash wizard"
-		pattern1 := regexp.MustCompile(`(?i)never forget that\s+@?(\w+(?:\s+\w+)?)`)
+		// Pattern: "set language for @user to X" or "set language for user to X"
+		pattern1 := regexp.MustCompile(`(?i)set\s+language\s+for\s+@?(\w+(?:\s+\w+)?)\s+to`)
 		matches := pattern1.FindStringSubmatch(content)
 		if len(matches) > 1 {
 			targetUsername = strings.TrimSpace(matches[1])
 		}
 
+		// Pattern: "set @user language to X" or "set user language to X"
+		if targetUsername == "" {
+			pattern2 := regexp.MustCompile(`(?i)set\s+@?(\w+(?:\s+\w+)?)\s+language\s+to`)
+			matches = pattern2.FindStringSubmatch(content)
+			if len(matches) > 1 {
+				targetUsername = strings.TrimSpace(matches[1])
+			}
+		}
+
+		// Pattern: "set language to X for @user" or "set language to X for user"
+		if targetUsername == "" {
+			pattern3 := regexp.MustCompile(`(?i)set\s+language\s+to\s+\w+\s+(?:for|to)\s+@?(\w+(?:\s+\w+)?)`)
+			matches = pattern3.FindStringSubmatch(content)
+			if len(matches) > 1 {
+				targetUsername = strings.TrimSpace(matches[1])
+			}
+		}
+
+		// Pattern: "never forget that @bash wizard" or "never forget that bash wizard"
+		if targetUsername == "" {
+			pattern3 := regexp.MustCompile(`(?i)never forget that\s+@?(\w+(?:\s+\w+)?)`)
+			matches = pattern3.FindStringSubmatch(content)
+			if len(matches) > 1 {
+				targetUsername = strings.TrimSpace(matches[1])
+			}
+		}
+
 		// Pattern: "set lang=XX for @user" or "set lang=XX for user"
 		if targetUsername == "" {
-			pattern2 := regexp.MustCompile(`(?i)set lang=\w+\s+(?:for|to)\s+@?(\w+(?:\s+\w+)?)`)
-			matches = pattern2.FindStringSubmatch(content)
+			pattern4 := regexp.MustCompile(`(?i)set lang=\w+\s+(?:for|to)\s+@?(\w+(?:\s+\w+)?)`)
+			matches = pattern4.FindStringSubmatch(content)
 			if len(matches) > 1 {
 				targetUsername = strings.TrimSpace(matches[1])
 			}
@@ -452,8 +623,8 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 
 		// Pattern: "@user only speaks X" or "user only speaks X"
 		if targetUsername == "" {
-			pattern3 := regexp.MustCompile(`(?i)@?(\w+(?:\s+\w+)?)\s+(?:only\s+)?speaks?\s+(?:pig\s+)?latin|french|spanish|german|italian|portuguese|japanese|chinese|korean|russian`)
-			matches = pattern3.FindStringSubmatch(content)
+			pattern5 := regexp.MustCompile(`(?i)@?(\w+(?:\s+\w+)?)\s+(?:only\s+)?speaks?\s+(?:pig\s+)?latin|french|spanish|german|italian|portuguese|japanese|chinese|korean|russian`)
+			matches = pattern5.FindStringSubmatch(content)
 			if len(matches) > 1 {
 				targetUsername = strings.TrimSpace(matches[1])
 			}
@@ -467,20 +638,65 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 		var err error
 
 		if targetUserID != "" {
-			// User found from mentions
+			// User found from mentions - use the mention ID directly
 			user, err = graphRepo.GetOrCreateUser(ctx, targetUserID, targetUserID, targetUsername, "discord")
-		} else {
-			// Try to find user by username
-			user, err = findUserFromMentionsOrUsername(ctx, s, m, targetUsername, graphRepo)
-		}
-
-		if err != nil {
-			log.Debug("Could not find user for language preference",
+			if err != nil {
+				log.Error("Failed to get/create mentioned user",
+					zap.String("user_id", targetUserID),
+					zap.String("username", targetUsername),
+					zap.Error(err),
+				)
+				return false, ""
+			}
+		} else if targetUsername != "" {
+			// Try to find user by username from text patterns
+			// First check if username matches any mention in the message
+			for _, mention := range m.Mentions {
+				if mention.ID != s.State.User.ID && strings.EqualFold(mention.Username, targetUsername) {
+					// Found matching mention - use it
+					user, err = graphRepo.GetOrCreateUser(ctx, mention.ID, mention.ID, mention.Username, "discord")
+					if err != nil {
+						log.Error("Failed to get/create matched mention user",
+							zap.String("user_id", mention.ID),
+							zap.String("username", mention.Username),
+							zap.Error(err),
+						)
+						return false, ""
+					}
+					targetUserID = mention.ID // Update for logging
+					break
+				}
+			}
+			
+			// If not found in mentions, try to find by username in database or search guild
+			if user == nil {
+				user, err = findUserFromMentionsOrUsername(ctx, s, m, targetUsername, graphRepo)
+				if err != nil {
+			log.Warn("Could not find user for language preference",
 				zap.String("username", targetUsername),
+				zap.String("user_id", targetUserID),
 				zap.Error(err),
 			)
-			return
+			return false, ""
 		}
+			}
+		}
+
+		// Set the preference for the target user
+		if user == nil {
+			// We had a target but couldn't find the user - don't set for requester
+			log.Warn("Target user specified but not found",
+				zap.String("target_username", targetUsername),
+				zap.String("target_user_id", targetUserID),
+			)
+			return false, ""
+		}
+
+		log.Info("Found target user for language preference",
+			zap.String("user_id", user.ID),
+			zap.String("username", user.DiscordUsername),
+			zap.String("target_username", targetUsername),
+		)
 
 		// Set language preference for the target user
 		if err := graphRepo.SetUserLanguagePreference(ctx, user.ID, detectedLang); err != nil {
@@ -488,7 +704,7 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 				zap.String("user_id", user.ID),
 				zap.Error(err),
 			)
-			return
+			return false, ""
 		}
 
 		// Get language name for fact
@@ -512,6 +728,8 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 			zap.String("requester_username", m.Author.Username),
 			zap.String("language", detectedLang),
 		)
+		// Return the target username for confirmation message
+		return true, user.DiscordUsername
 	} else {
 		// No target user found - set preference for the requester (person making the request)
 		requesterUser, err := graphRepo.GetOrCreateUser(ctx, m.Author.ID, m.Author.ID, m.Author.Username, "discord")
@@ -520,7 +738,7 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 				zap.String("user_id", m.Author.ID),
 				zap.Error(err),
 			)
-			return
+			return false, ""
 		}
 
 		// Set language preference for requester
@@ -529,7 +747,7 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 				zap.String("user_id", requesterUser.ID),
 				zap.Error(err),
 			)
-			return
+			return false, ""
 		}
 
 		// Get language name for fact
@@ -551,6 +769,10 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 			zap.String("username", requesterUser.DiscordUsername),
 			zap.String("language", detectedLang),
 		)
+		// Return empty string for targetUserForLang since it was set for requester
+		return true, ""
 	}
+	
+	return false, ""
 }
 
