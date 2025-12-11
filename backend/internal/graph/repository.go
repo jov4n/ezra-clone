@@ -128,10 +128,28 @@ func (r *Repository) FetchState(ctx context.Context, agentID string) (*state.Con
 }
 
 // UpdateMemory updates or creates a memory block for an agent
+// If the agent doesn't exist, it will be created automatically
 func (r *Repository) UpdateMemory(ctx context.Context, agentID, blockName, newContent string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
+	// First, ensure the agent exists
+	agentQuery := `
+		MERGE (a:Agent {id: $agentID})
+		ON CREATE SET a.name = $agentID
+		RETURN a.id as id
+	`
+	result, err := session.Run(ctx, agentQuery, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to ensure agent exists: %w", err)
+	}
+	if !result.Next(ctx) {
+		return fmt.Errorf("failed to create or find agent: %s", agentID)
+	}
+
+	// Now update/create the memory block
 	query := `
 		MATCH (a:Agent {id: $agentID})
 		MERGE (a)-[:HAS_MEMORY]->(m:Memory {name: $blockName})
@@ -140,7 +158,7 @@ func (r *Repository) UpdateMemory(ctx context.Context, agentID, blockName, newCo
 		RETURN m.name as name
 	`
 
-	_, err := session.Run(ctx, query, map[string]interface{}{
+	_, err = session.Run(ctx, query, map[string]interface{}{
 		"agentID":   agentID,
 		"blockName": blockName,
 		"newContent": newContent,

@@ -16,37 +16,69 @@ Think of it as a "Memory Operating System" for AI agents - the backend manages s
 
 ## Architecture
 
-The platform consists of three main components working together:
+The platform consists of three independent components that share state through Neo4j:
 
-### 1. **The Brain (Backend)**
-A GoLang service that acts as the "Memory Operating System":
-- Manages agent state and memory in Neo4j (graph database)
+### 1. **HTTP API Server**
+A GoLang service that provides REST API endpoints for the frontend:
+- Connects directly to Neo4j for agent state and memory
 - Handles reasoning via LiteLLM/Claude
 - Executes tools and actions
-- Provides REST API for the frontend
-- Processes all agent logic and decision-making
+- Processes agent logic independently
+- Provides REST API endpoints for the web dashboard
 
-**Location**: `backend/`
+**Location**: `backend/cmd/server/`
 
-### 2. **The Body (Discord Bot)**
-A GoLang worker that bridges Discord to the Brain:
+**Key Features**:
+- Independent agent orchestrator instance
+- Direct Neo4j database access
+- No dependency on Discord bot
+- Can run standalone for web-only deployments
+
+### 2. **Discord Bot**
+A GoLang process that handles Discord interactions:
+- Connects directly to Neo4j (same database as server)
 - Listens for Discord messages (mentions and DMs)
-- Forwards messages to the Brain for processing
+- Processes messages with its own agent orchestrator
 - Sends agent responses back to Discord
 - Handles Discord-specific features (embeds, long messages, etc.)
 - Supports language preferences and user context
 
 **Location**: `backend/cmd/bot/`
 
+**Key Features**:
+- Independent agent orchestrator instance
+- Direct Neo4j database access
+- No dependency on HTTP server
+- Can run standalone for Discord-only deployments
+- Shares agent state with server through Neo4j
+
 ### 3. **The Dashboard (ADE)**
 A Next.js frontend for developers to interact with and debug agents:
-- Real-time chat interface with the agent
+- Real-time chat interface with the agent (via HTTP API)
 - Visualize agent's complete context window
 - Edit memory blocks directly
 - View tool calls and agent reasoning
 - Monitor agent state changes
 
 **Location**: `frontend/`
+
+### Shared Components
+
+Both the HTTP server and Discord bot use the same shared codebase:
+- **Agent Orchestrator** (`internal/agent/`) - Core reasoning and tool execution
+- **Graph Repository** (`internal/graph/`) - Neo4j operations
+- **LLM Adapter** (`internal/adapter/`) - LiteLLM/Claude communication
+- **Tools** (`internal/tools/`) - Tool executors (web, GitHub, memory, etc.)
+
+### State Coordination
+
+- **Neo4j Database**: Shared state storage for all agent data
+  - Agent memory blocks
+  - User context and facts
+  - Conversation history
+  - Topics and relationships
+- **No Direct Communication**: Server and bot don't communicate with each other
+- **Shared State**: Both read/write to the same Neo4j database, ensuring consistency
 
 ## Features
 
@@ -210,12 +242,19 @@ go run backend/cmd/server/main.go
 
 Server runs on `http://localhost:8080`
 
-**Discord Bot** (optional):
+**Discord Bot** (optional, can run independently):
 ```bash
 go run backend/cmd/bot/main.go
 ```
 
 The bot will connect to Discord and start listening for messages.
+
+**Note**: The server and bot are independent processes. You can run:
+- Only the server (for web dashboard)
+- Only the bot (for Discord functionality)
+- Both (for full functionality)
+
+Both processes share the same Neo4j database, so agent state is synchronized between them.
 
 ### 6. Start Frontend
 

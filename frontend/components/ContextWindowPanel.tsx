@@ -33,9 +33,12 @@ export default function ContextWindowPanel({
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 2000);
-    return () => clearInterval(interval);
-  }, [agentID]);
+    // Only auto-refresh when not editing to avoid clearing user input
+    if (!editingBlock && !showAddBlock) {
+      const interval = setInterval(loadData, 5000); // Increased to 5 seconds
+      return () => clearInterval(interval);
+    }
+  }, [agentID, editingBlock, showAddBlock]);
 
   const loadData = async () => {
     try {
@@ -58,13 +61,16 @@ export default function ContextWindowPanel({
     setSaving(true);
     try {
       await updateMemoryBlock(agentID, blockName, content);
+      // Only refresh on success
       await loadData();
       if (onUpdate) {
         onUpdate();
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to save memory:', error);
-      alert('Failed to save memory block');
+      const errorMsg = error?.response?.data?.error || error?.message || 'Failed to save memory block';
+      alert(`Failed to save memory block: ${errorMsg}`);
+      // Don't refresh on error - preserve user's input
     } finally {
       setSaving(false);
     }
@@ -141,9 +147,11 @@ export default function ContextWindowPanel({
       if (onUpdate) {
         onUpdate();
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to save memory block:', error);
-      alert('Failed to save memory block');
+      const errorMsg = error?.response?.data?.error || error?.message || 'Failed to save memory block';
+      alert(`Failed to save memory block: ${errorMsg}`);
+      // Don't clear editing state on error - let user try again
     } finally {
       setSaving(false);
     }
@@ -161,9 +169,11 @@ export default function ContextWindowPanel({
       if (onUpdate) {
         onUpdate();
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to create memory block:', error);
-      alert('Failed to create memory block');
+      const errorMsg = error?.response?.data?.error || error?.message || 'Failed to create memory block';
+      alert(`Failed to create memory block: ${errorMsg}`);
+      // Don't clear form on error - let user try again
     } finally {
       setSaving(false);
     }
