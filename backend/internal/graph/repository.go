@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"ezra-clone/backend/internal/state"
 	"ezra-clone/backend/pkg/logger"
@@ -149,6 +150,40 @@ func (r *Repository) UpdateMemory(ctx context.Context, agentID, blockName, newCo
 	}
 
 	r.logger.Info("Memory block updated",
+		zap.String("agent_id", agentID),
+		zap.String("block_name", blockName),
+	)
+	return nil
+}
+
+// DeleteMemory deletes a memory block for an agent
+func (r *Repository) DeleteMemory(ctx context.Context, agentID, blockName string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:HAS_MEMORY]->(m:Memory {name: $blockName})
+		DETACH DELETE m
+		RETURN count(m) as deleted
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID":   agentID,
+		"blockName": blockName,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete memory: %w", err)
+	}
+
+	if result.Next(ctx) {
+		record := result.Record()
+		deleted, _ := record.Get("deleted")
+		if deletedCount, ok := deleted.(int64); ok && deletedCount == 0 {
+			return fmt.Errorf("memory block not found")
+		}
+	}
+
+	r.logger.Info("Memory block deleted",
 		zap.String("agent_id", agentID),
 		zap.String("block_name", blockName),
 	)
@@ -306,6 +341,505 @@ func getFloat64FromMap(m map[string]interface{}, key string, defaultValue float6
 	}
 	if f, ok := val.(float64); ok {
 		return f
+	}
+	return defaultValue
+}
+
+// ListAgents returns all agents with their metadata
+func (r *Repository) ListAgents(ctx context.Context) ([]AgentInfo, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent)
+		RETURN a.id as id, a.name as name, a.created_at as created_at
+		ORDER BY a.created_at DESC
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list agents: %w", err)
+	}
+
+	var agents []AgentInfo
+	for result.Next(ctx) {
+		record := result.Record()
+		createdAt := getTimeFromRecord(record, "created_at", time.Now())
+		agents = append(agents, AgentInfo{
+			ID:        getString(record, "id", ""),
+			Name:      getString(record, "name", ""),
+			CreatedAt: createdAt,
+		})
+	}
+
+	return agents, nil
+}
+
+// AgentInfo represents basic agent information
+type AgentInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// GetAgentConfig retrieves agent configuration (model, system_instructions)
+func (r *Repository) GetAgentConfig(ctx context.Context, agentID string) (*AgentConfig, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})
+		OPTIONAL MATCH (a)-[:HAS_IDENTITY]->(id:AgentIdentity)
+		RETURN 
+			a.model as model,
+			a.system_instructions as system_instructions,
+			id.personality as personality
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agent config: %w", err)
+	}
+
+	if !result.Next(ctx) {
+		return nil, ErrAgentNotFound{AgentID: agentID}
+	}
+
+	record := result.Record()
+	model := getString(record, "model", "")
+	systemInstructions := getString(record, "system_instructions", "")
+	personality := getString(record, "personality", "")
+
+	// If system_instructions is not set, use personality as fallback
+	if systemInstructions == "" {
+		systemInstructions = personality
+	}
+
+	return &AgentConfig{
+		Model:              model,
+		SystemInstructions: systemInstructions,
+	}, nil
+}
+
+// AgentConfig represents agent configuration
+type AgentConfig struct {
+	Model              string `json:"model"`
+	SystemInstructions string `json:"system_instructions"`
+}
+
+// UpdateAgentConfig updates agent configuration
+func (r *Repository) UpdateAgentConfig(ctx context.Context, agentID string, config AgentConfig) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})
+		SET a.model = $model,
+		    a.system_instructions = $system_instructions,
+		    a.updated_at = datetime()
+		RETURN a.id as id
+	`
+
+	_, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID":            agentID,
+		"model":              config.Model,
+		"system_instructions": config.SystemInstructions,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update agent config: %w", err)
+	}
+
+	r.logger.Info("Agent config updated",
+		zap.String("agent_id", agentID),
+		zap.String("model", config.Model),
+	)
+	return nil
+}
+
+// GetArchivalMemories retrieves all archival memories for an agent
+func (r *Repository) GetArchivalMemories(ctx context.Context, agentID string) ([]ArchivalMemory, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:HAS_ARCHIVAL]->(arch:Archival)
+		RETURN arch.id as id,
+		       arch.summary as summary,
+		       arch.timestamp as timestamp,
+		       arch.relevance_score as relevance_score,
+		       arch.content as content
+		ORDER BY arch.timestamp DESC
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get archival memories: %w", err)
+	}
+
+	var memories []ArchivalMemory
+	for result.Next(ctx) {
+		record := result.Record()
+		timestamp := getTimeFromRecord(record, "timestamp", time.Now())
+		relevanceScore := getFloat64FromRecord(record, "relevance_score")
+		memoryID := getString(record, "id", "")
+		// If no ID exists, generate one from timestamp
+		if memoryID == "" {
+			memoryID = uuid.New().String()
+		}
+		memories = append(memories, ArchivalMemory{
+			ID:             memoryID,
+			Summary:        getString(record, "summary", ""),
+			Content:        getString(record, "content", ""),
+			Timestamp:      timestamp,
+			RelevanceScore: relevanceScore,
+		})
+	}
+
+	return memories, nil
+}
+
+// ArchivalMemory represents an archival memory entry
+type ArchivalMemory struct {
+	ID             string    `json:"id"`
+	Summary        string    `json:"summary"`
+	Content        string    `json:"content"`
+	Timestamp      time.Time `json:"timestamp"`
+	RelevanceScore float64   `json:"relevance_score"`
+}
+
+// DeleteArchivalMemory deletes an archival memory by ID
+func (r *Repository) DeleteArchivalMemory(ctx context.Context, agentID string, memoryID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:HAS_ARCHIVAL]->(arch:Archival {id: $memoryID})
+		DETACH DELETE arch
+		RETURN count(arch) as deleted
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID":  agentID,
+		"memoryID": memoryID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete archival memory: %w", err)
+	}
+
+	if result.Next(ctx) {
+		record := result.Record()
+		deleted, _ := record.Get("deleted")
+		if deletedCount, ok := deleted.(int64); ok && deletedCount == 0 {
+			return fmt.Errorf("archival memory not found")
+		}
+	}
+
+	r.logger.Info("Archival memory deleted",
+		zap.String("agent_id", agentID),
+		zap.String("memory_id", memoryID),
+	)
+	return nil
+}
+
+// CreateArchivalMemory creates a new archival memory
+func (r *Repository) CreateArchivalMemory(ctx context.Context, agentID string, memory ArchivalMemory) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	timestampStr := memory.Timestamp.UTC().Format(time.RFC3339)
+	
+	// Generate ID if not provided
+	if memory.ID == "" {
+		memory.ID = uuid.New().String()
+	}
+
+	query := `
+		MATCH (a:Agent {id: $agentID})
+		CREATE (a)-[:HAS_ARCHIVAL]->(arch:Archival {
+			id: $id,
+			summary: $summary,
+			content: $content,
+			timestamp: datetime($timestamp),
+			relevance_score: $relevance_score
+		})
+		RETURN arch
+	`
+
+	_, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID":        agentID,
+		"id":             memory.ID,
+		"summary":         memory.Summary,
+		"content":         memory.Content,
+		"timestamp":      timestampStr,
+		"relevance_score": memory.RelevanceScore,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create archival memory: %w", err)
+	}
+
+	r.logger.Info("Archival memory created",
+		zap.String("agent_id", agentID),
+		zap.String("summary", memory.Summary),
+	)
+	return nil
+}
+
+// GetContextStats estimates token usage for an agent's context window
+func (r *Repository) GetContextStats(ctx context.Context, agentID string) (*ContextStats, error) {
+	state, err := r.FetchState(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Simple token estimation: ~4 characters per token
+	// This is a rough approximation
+	totalChars := 0
+	
+	// Count identity
+	totalChars += len(state.Identity.Name)
+	totalChars += len(state.Identity.Personality)
+	for _, cap := range state.Identity.Capabilities {
+		totalChars += len(cap)
+	}
+
+	// Count core memory
+	for _, block := range state.CoreMemory {
+		totalChars += len(block.Name)
+		totalChars += len(block.Content)
+	}
+
+	// Count archival refs
+	for _, arch := range state.ArchivalRefs {
+		totalChars += len(arch.Summary)
+	}
+
+	// Estimate tokens (rough: 4 chars per token)
+	estimatedTokens := totalChars / 4
+
+	// Default context window sizes (can be made configurable)
+	totalTokens := 16384 // Default for most models
+	if estimatedTokens > 8192 {
+		totalTokens = 32768 // Larger models
+	}
+
+	return &ContextStats{
+		UsedTokens:  estimatedTokens,
+		TotalTokens: totalTokens,
+	}, nil
+}
+
+// GetAllFacts retrieves all facts known by an agent
+// Note: Fact type is defined in enhanced_repository.go
+func (r *Repository) GetAllFacts(ctx context.Context, agentID string) ([]*Fact, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:KNOWS_FACT]->(f:Fact)
+		RETURN f.id as id, f.content as content, f.source as source,
+		       f.confidence as confidence, f.created_at as created_at
+		ORDER BY f.created_at DESC
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get facts: %w", err)
+	}
+
+	var facts []*Fact
+	for result.Next(ctx) {
+		record := result.Record()
+		createdAt := getTimeFromRecord(record, "created_at", time.Now())
+		confidence := getFloat64FromRecord(record, "confidence")
+		facts = append(facts, &Fact{
+			ID:         getString(record, "id", ""),
+			Content:    getString(record, "content", ""),
+			Source:     getString(record, "source", ""),
+			Confidence: confidence,
+			CreatedAt:  createdAt,
+		})
+	}
+
+	return facts, nil
+}
+
+// GetAllTopics retrieves all topics related to an agent
+// Note: Topic type is defined in enhanced_repository.go
+func (r *Repository) GetAllTopics(ctx context.Context, agentID string) ([]*Topic, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:KNOWS_FACT]->(f:Fact)-[:ABOUT]->(t:Topic)
+		RETURN DISTINCT t.id as id, t.name as name, t.description as description
+		ORDER BY t.name
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get topics: %w", err)
+	}
+
+	var topics []*Topic
+	for result.Next(ctx) {
+		record := result.Record()
+		topics = append(topics, &Topic{
+			ID:          getString(record, "id", ""),
+			Name:        getString(record, "name", ""),
+			Description: getString(record, "description", ""),
+		})
+	}
+
+	return topics, nil
+}
+
+// GetAllMessages retrieves all messages sent by or to an agent
+// Note: Message type is defined in enhanced_repository.go
+func (r *Repository) GetAllMessages(ctx context.Context, agentID string, limit int) ([]*Message, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	if limit < 1 {
+		limit = 100
+	}
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:SENT]->(m:Message)
+		RETURN m.id as id, m.content as content, m.role as role,
+		       m.platform as platform, m.timestamp as timestamp
+		ORDER BY m.timestamp DESC
+		LIMIT $limit
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+		"limit":   limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get messages: %w", err)
+	}
+
+	var messages []*Message
+	for result.Next(ctx) {
+		record := result.Record()
+		timestamp := getTimeFromRecord(record, "timestamp", time.Now())
+		messages = append(messages, &Message{
+			ID:        getString(record, "id", ""),
+			Content:   getString(record, "content", ""),
+			Role:      getString(record, "role", ""),
+			Platform:  getString(record, "platform", ""),
+			Timestamp: timestamp,
+		})
+	}
+
+	return messages, nil
+}
+
+// GetAllConversations retrieves all conversations for an agent
+// Note: Conversation type is defined in enhanced_repository.go
+func (r *Repository) GetAllConversations(ctx context.Context, agentID string, limit int) ([]*Conversation, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	if limit < 1 {
+		limit = 50
+	}
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:SENT]->(m:Message)<-[:CONTAINS]-(c:Conversation)
+		RETURN DISTINCT c.id as id, c.channel_id as channel_id,
+		       c.platform as platform, c.started_at as started_at
+		ORDER BY c.started_at DESC
+		LIMIT $limit
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+		"limit":   limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get conversations: %w", err)
+	}
+
+	var conversations []*Conversation
+	for result.Next(ctx) {
+		record := result.Record()
+		startedAt := getTimeFromRecord(record, "started_at", time.Now())
+		conversations = append(conversations, &Conversation{
+			ID:        getString(record, "id", ""),
+			ChannelID: getString(record, "channel_id", ""),
+			Platform:  getString(record, "platform", ""),
+			StartedAt: startedAt,
+		})
+	}
+
+	return conversations, nil
+}
+
+// GetAllUsers retrieves all users that have interacted with an agent
+// Note: User type is defined in enhanced_repository.go
+func (r *Repository) GetAllUsers(ctx context.Context, agentID string) ([]*User, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (a:Agent {id: $agentID})-[:SENT]->(m:Message)<-[:SENT]-(u:User)
+		RETURN DISTINCT u.id as id, u.discord_id as discord_id,
+		       u.discord_username as discord_username, u.web_id as web_id,
+		       u.preferred_language as preferred_language,
+		       u.first_seen as first_seen, u.last_seen as last_seen
+		ORDER BY u.last_seen DESC
+	`
+
+	result, err := session.Run(ctx, query, map[string]interface{}{
+		"agentID": agentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get users: %w", err)
+	}
+
+	var users []*User
+	for result.Next(ctx) {
+		record := result.Record()
+		firstSeen := getTimeFromRecord(record, "first_seen", time.Now())
+		lastSeen := getTimeFromRecord(record, "last_seen", time.Now())
+		users = append(users, &User{
+			ID:              getString(record, "id", ""),
+			DiscordID:       getString(record, "discord_id", ""),
+			DiscordUsername: getString(record, "discord_username", ""),
+			WebID:           getString(record, "web_id", ""),
+			PreferredLanguage: getString(record, "preferred_language", ""),
+			FirstSeen:       firstSeen,
+			LastSeen:        lastSeen,
+		})
+	}
+
+	return users, nil
+}
+
+// ContextStats represents context window statistics
+type ContextStats struct {
+	UsedTokens  int `json:"used_tokens"`
+	TotalTokens int `json:"total_tokens"`
+}
+
+// Helper functions for records
+
+func getTimeFromRecord(record *neo4j.Record, key string, defaultValue time.Time) time.Time {
+	val, ok := record.Get(key)
+	if !ok {
+		return defaultValue
+	}
+	if t, ok := val.(time.Time); ok {
+		return t
 	}
 	return defaultValue
 }

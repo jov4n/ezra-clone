@@ -107,19 +107,31 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 		return nil, fmt.Errorf("failed to fetch state: %w", err)
 	}
 
-	// 2. Get user context if available
+	// 2. Get agent config to use the correct model
+	agentConfig, err := o.graphRepo.GetAgentConfig(ctx, execCtx.AgentID)
+	if err == nil && agentConfig.Model != "" {
+		// Temporarily set the model for this agent's turn
+		originalModel := o.llm.GetModel()
+		o.llm.SetModel(agentConfig.Model)
+		defer func() {
+			// Restore original model after the turn
+			o.llm.SetModel(originalModel)
+		}()
+	}
+
+	// 3. Get user context if available
 	userCtx, _ := o.graphRepo.GetUserContext(ctx, execCtx.UserID)
 
-	// 3. Build System Prompt
+	// 4. Build System Prompt
 	systemPrompt, err := o.buildSystemPrompt(ctxWindow, userCtx, execCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build system prompt: %w", err)
 	}
 
-	// 4. Get all tools
+	// 5. Get all tools
 	allTools := tools.GetAllTools()
 
-	// 5. Think - Call LLM
+	// 6. Think - Call LLM
 	llmResponse, err := o.llm.Generate(ctx, systemPrompt, message, allTools)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate LLM response: %w", err)

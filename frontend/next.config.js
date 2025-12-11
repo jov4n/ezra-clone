@@ -9,6 +9,13 @@ const nextConfig = {
       },
     ];
   },
+  // Disable webpack cache to avoid OneDrive issues
+  webpack: (config, { dev, isServer }) => {
+    if (dev) {
+      config.cache = false;
+    }
+    return config;
+  },
 };
 
 module.exports = nextConfig;

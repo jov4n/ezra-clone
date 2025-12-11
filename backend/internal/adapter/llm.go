@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -15,7 +16,25 @@ import (
 type LLMAdapter struct {
 	client *openai.Client
 	model  string
+	mu     sync.RWMutex // Protects model field for concurrent access
 	logger *zap.Logger
+}
+
+// SetModel updates the model used by this adapter
+func (a *LLMAdapter) SetModel(model string) {
+	if model != "" {
+		a.mu.Lock()
+		a.model = model
+		a.mu.Unlock()
+		a.logger.Debug("LLM adapter model updated", zap.String("model", model))
+	}
+}
+
+// GetModel returns the current model
+func (a *LLMAdapter) GetModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.model
 }
 
 // NewLLMAdapter creates a new LLM adapter
@@ -87,8 +106,12 @@ func (a *LLMAdapter) Generate(ctx context.Context, systemPrompt, userMsg string,
 		})
 	}
 
+	a.mu.RLock()
+	currentModel := a.model
+	a.mu.RUnlock()
+
 	req := openai.ChatCompletionRequest{
-		Model:       a.model,
+		Model:       currentModel,
 		Messages:    messages,
 		Tools:       openaiTools,
 		// ToolChoice defaults to "auto" when tools are provided
@@ -164,8 +187,12 @@ func (a *LLMAdapter) Generate(ctx context.Context, systemPrompt, userMsg string,
 		}
 	}
 
+	a.mu.RLock()
+	modelUsed := a.model
+	a.mu.RUnlock()
+
 	a.logger.Debug("LLM response generated",
-		zap.String("model", a.model),
+		zap.String("model", modelUsed),
 		zap.Int("tool_calls", len(response.ToolCalls)),
 		zap.Bool("has_content", response.Content != ""),
 	)
