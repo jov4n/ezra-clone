@@ -311,16 +311,7 @@ func getStringSlice(record *neo4j.Record, key string) []string {
 	return []string{}
 }
 
-func getStringFromMap(m map[string]interface{}, key string, defaultValue string) string {
-	val, ok := m[key]
-	if !ok {
-		return defaultValue
-	}
-	if str, ok := val.(string); ok {
-		return str
-	}
-	return defaultValue
-}
+// getStringFromMap and getFloat64FromMap are defined in helpers.go
 
 func getTimeFromMap(m map[string]interface{}, key string, defaultValue time.Time) time.Time {
 	val, ok := m[key]
@@ -334,16 +325,7 @@ func getTimeFromMap(m map[string]interface{}, key string, defaultValue time.Time
 	return defaultValue
 }
 
-func getFloat64FromMap(m map[string]interface{}, key string, defaultValue float64) float64 {
-	val, ok := m[key]
-	if !ok {
-		return defaultValue
-	}
-	if f, ok := val.(float64); ok {
-		return f
-	}
-	return defaultValue
-}
+// getFloat64FromMap is defined in helpers.go
 
 // ListAgents returns all agents with their metadata
 func (r *Repository) ListAgents(ctx context.Context) ([]AgentInfo, error) {

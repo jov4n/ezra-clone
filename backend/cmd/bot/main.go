@@ -13,8 +13,10 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"ezra-clone/backend/internal/adapter"
 	"ezra-clone/backend/internal/agent"
+	"ezra-clone/backend/internal/constants"
 	"ezra-clone/backend/internal/graph"
 	"ezra-clone/backend/internal/tools"
+	"ezra-clone/backend/internal/utils"
 	"ezra-clone/backend/pkg/config"
 	"ezra-clone/backend/pkg/logger"
 	"go.uber.org/zap"
@@ -222,20 +224,22 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 
 	// If language preference was set, send confirmation and skip LLM processing
 	if languagePreferenceSet && targetUserForLang != "" {
-		langName := getLanguageNameFromCode(extractLanguageFromMessage(content))
+		langCode := utils.ExtractLanguageFromMessage(content)
+		langName := utils.GetLanguageName(langCode)
 		confirmationMsg := fmt.Sprintf("✅ I've noted that %s prefers %s!", targetUserForLang, langName)
 		_, _ = s.ChannelMessageSend(m.ChannelID, confirmationMsg)
 		return
 	} else if languagePreferenceSet {
 		// Language preference set for requester
-		langName := getLanguageNameFromCode(extractLanguageFromMessage(content))
+		langCode := utils.ExtractLanguageFromMessage(content)
+		langName := utils.GetLanguageName(langCode)
 		confirmationMsg := fmt.Sprintf("✅ I've noted that you prefer %s! I'll respond in %s from now on.", langName, langName)
 		_, _ = s.ChannelMessageSend(m.ChannelID, confirmationMsg)
 		return
 	}
 
 	// Run agent turn with full context
-	agentID := "Ezra" // Default agent ID
+	agentID := constants.DefaultAgentID // Default agent ID
 	channelID := m.ChannelID
 	platform := "discord"
 	result, err := agentOrch.RunTurnWithContext(ctx, agentID, m.Author.ID, channelID, platform, content)
@@ -298,8 +302,8 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 		
 		// Send message with embeds - truncate content if needed
 		content := result.Content
-		if len(content) > 2000 {
-			content = content[:1997] + "..."
+		if len(content) > constants.DiscordMaxMessageLength {
+			content = content[:constants.DiscordMaxMessageLength-3] + "..."
 		}
 		
 		_, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
@@ -318,12 +322,12 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 	}
 }
 
-// sendLongMessage splits a message into chunks if it exceeds Discord's 2000 character limit
+// sendLongMessage splits a message into chunks if it exceeds Discord's character limit
 func sendLongMessage(s *discordgo.Session, channelID, content string, log *zap.Logger) {
-	const maxLength = 2000
+	maxLength := constants.DiscordMaxMessageLength
 	const chunkPrefix = "```\n"
 	const chunkSuffix = "\n```"
-	const maxChunkLength = maxLength - len(chunkPrefix) - len(chunkSuffix)
+	maxChunkLength := maxLength - len(chunkPrefix) - len(chunkSuffix)
 	
 	if len(content) <= maxLength {
 		// Message fits in one chunk
@@ -448,60 +452,12 @@ func findUserFromMentionsOrUsername(ctx context.Context, s *discordgo.Session, m
 	return nil, fmt.Errorf("user not found: %s", targetUsername)
 }
 
-// getLanguageNameFromCode returns the display name for a language code
-func getLanguageNameFromCode(langCode string) string {
-	langNames := map[string]string{
-		"fr":        "French",
-		"en":        "English",
-		"es":        "Spanish",
-		"de":        "German",
-		"it":        "Italian",
-		"pt":        "Portuguese",
-		"ja":        "Japanese",
-		"zh":        "Chinese",
-		"ko":        "Korean",
-		"ru":        "Russian",
-		"pig_latin": "Pig Latin",
-	}
-	
-	if name, ok := langNames[langCode]; ok {
-		return name
-	}
-	return langCode // Return code if name not found
-}
-
-// extractLanguageFromMessage extracts the language code from a message
-func extractLanguageFromMessage(content string) string {
-	lowerContent := strings.ToLower(content)
-	languagePatterns := map[string][]string{
-		"fr":        {"france", "speak french", "respond in french", "lang=fr", "language=french", "only speaks french", "only speak french"},
-		"en":        {"english", "speak english", "respond in english", "lang=en", "language=english", "preferred language is english", "prefers to speak in english"},
-		"pig_latin": {"pig latin", "speaks pig latin", "only speaks pig latin", "only speak pig latin"},
-		"es":        {"spanish", "speaks spanish", "only speaks spanish", "only speak spanish", "lang=es"},
-		"de":        {"german", "speaks german", "only speaks german", "only speak german", "lang=de"},
-		"it":        {"italian", "speaks italian", "only speaks italian", "only speak italian", "lang=it"},
-		"pt":        {"portuguese", "speaks portuguese", "only speaks portuguese", "only speak portuguese", "lang=pt"},
-		"ja":        {"japanese", "speaks japanese", "only speaks japanese", "only speak japanese", "lang=ja"},
-		"zh":        {"chinese", "speaks chinese", "only speaks chinese", "only speak chinese", "lang=zh"},
-		"ko":        {"korean", "speaks korean", "only speaks korean", "only speak korean", "lang=ko"},
-		"ru":        {"russian", "speaks russian", "only speaks russian", "only speak russian", "lang=ru"},
-	}
-	
-	for langCode, patterns := range languagePatterns {
-		for _, pattern := range patterns {
-			if strings.Contains(lowerContent, pattern) {
-				return langCode
-			}
-		}
-	}
-	return ""
-}
 
 // handleLanguagePreferenceInstruction detects and processes language preference instructions
 // Returns (success bool, targetUsername string) - targetUsername is empty if set for requester
 func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Session, m *discordgo.MessageCreate, content string, graphRepo *graph.Repository, log *zap.Logger) (bool, string) {
 	// Normalize content for pattern matching
-	lowerContent := strings.ToLower(content)
+	_ = strings.ToLower(content) // Reserved for future pattern matching
 
 	// Detect language preferences from various patterns
 	// Pattern 1: "never forget that @user is from france speak french when he talks to you"
@@ -509,34 +465,8 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 	// Pattern 3: "speak french" or "respond in french" for a mentioned user
 	// Pattern 4: "only speaks X" or "speaks X" for a mentioned user
 
-	// Language detection patterns
-	languagePatterns := map[string][]string{
-		"fr":        {"france", "speak french", "respond in french", "lang=fr", "language=french", "only speaks french", "only speak french"},
-		"en":        {"english", "speak english", "respond in english", "lang=en", "language=english", "preferred language is english", "prefers to speak in english"},
-		"pig_latin": {"pig latin", "speaks pig latin", "only speaks pig latin", "only speak pig latin"},
-		"es":        {"spanish", "speaks spanish", "only speaks spanish", "only speak spanish", "lang=es"},
-		"de":        {"german", "speaks german", "only speaks german", "only speak german", "lang=de"},
-		"it":        {"italian", "speaks italian", "only speaks italian", "only speak italian", "lang=it"},
-		"pt":        {"portuguese", "speaks portuguese", "only speaks portuguese", "only speak portuguese", "lang=pt"},
-		"ja":        {"japanese", "speaks japanese", "only speaks japanese", "only speak japanese", "lang=ja"},
-		"zh":        {"chinese", "speaks chinese", "only speaks chinese", "only speak chinese", "lang=zh"},
-		"ko":        {"korean", "speaks korean", "only speaks korean", "only speak korean", "lang=ko"},
-		"ru":        {"russian", "speaks russian", "only speaks russian", "only speak russian", "lang=ru"},
-	}
-
 	// Check for any language indicator
-	var detectedLang string
-	for langCode, patterns := range languagePatterns {
-		for _, pattern := range patterns {
-			if strings.Contains(lowerContent, pattern) {
-				detectedLang = langCode
-				break
-			}
-		}
-		if detectedLang != "" {
-			break
-		}
-	}
+	detectedLang := utils.ExtractLanguageFromMessage(content)
 
 	if detectedLang == "" {
 		return false, ""
@@ -708,10 +638,10 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 		}
 
 		// Get language name for fact
-		langName := getLanguageNameFromCode(detectedLang)
+		langName := utils.GetLanguageName(detectedLang)
 		
 		// Create a fact about the language preference
-		agentID := "Ezra"
+		agentID := constants.DefaultAgentID
 		factContent := fmt.Sprintf("User prefers to communicate in %s", langName)
 		_, err = graphRepo.CreateFact(ctx, agentID, factContent, "language_preference", user.ID, []string{"Language Preferences"})
 		if err != nil {
@@ -751,10 +681,10 @@ func handleLanguagePreferenceInstruction(ctx context.Context, s *discordgo.Sessi
 		}
 
 		// Get language name for fact
-		langName := getLanguageNameFromCode(detectedLang)
+		langName := utils.GetLanguageName(detectedLang)
 		
 		// Create a fact about the language preference
-		agentID := "Ezra"
+		agentID := constants.DefaultAgentID
 		factContent := fmt.Sprintf("User prefers to communicate in %s", langName)
 		_, err = graphRepo.CreateFact(ctx, agentID, factContent, "language_preference", requesterUser.ID, []string{"Language Preferences"})
 		if err != nil {
