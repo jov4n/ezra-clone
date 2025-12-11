@@ -45,12 +45,20 @@ func (o *Orchestrator) SetDiscordExecutor(de *tools.DiscordExecutor) {
 	o.toolExecutor.SetDiscordExecutor(de)
 }
 
+// SetComfyExecutor sets the ComfyUI executor for image generation tools
+func (o *Orchestrator) SetComfyExecutor(ce *tools.ComfyExecutor) {
+	o.toolExecutor.SetComfyExecutor(ce)
+}
+
 // TurnResult represents the result of a single agent turn
 type TurnResult struct {
 	Content   string
 	ToolCalls []adapter.ToolCall
 	Ignored   bool
 	Embeds    []Embed // Optional embeds for rich content
+	ImageData []byte  // Optional image data for Discord attachment
+	ImageName string  // Optional image filename for Discord attachment
+	ImageMeta map[string]interface{} // Optional image metadata (seed, dimensions, etc.)
 }
 
 // Embed represents a Discord-style embed
@@ -88,6 +96,11 @@ func (o *Orchestrator) RunTurnWithContext(ctx context.Context, agentID, userID, 
 
 // runTurnRecursive executes a turn with recursion tracking
 func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.ExecutionContext, message string, depth int) (*TurnResult, error) {
+	return o.runTurnRecursiveWithImage(ctx, execCtx, message, depth, nil, "", nil)
+}
+
+// runTurnRecursiveWithImage executes a turn with recursion tracking and preserves image data
+func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *tools.ExecutionContext, message string, depth int, preservedImageData []byte, preservedImageName string, preservedImageMeta map[string]interface{}) (*TurnResult, error) {
 	if depth >= constants.MaxRecursionDepth {
 		return nil, ErrMaxRecursion
 	}
@@ -119,16 +132,27 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 	// 3. Get user context if available
 	userCtx, _ := o.graphRepo.GetUserContext(ctx, execCtx.UserID)
 
-	// 4. Build System Prompt
-	systemPrompt, err := o.buildSystemPrompt(ctxWindow, userCtx, execCtx)
+	// 4. Get recent conversation history for context (if channel ID is available)
+	var conversationHistory []graph.Message
+	if execCtx.ChannelID != "" {
+		history, err := o.graphRepo.GetConversationHistory(ctx, execCtx.ChannelID, 15)
+		if err == nil {
+			conversationHistory = history
+		} else {
+			o.logger.Debug("Failed to fetch conversation history", zap.Error(err))
+		}
+	}
+
+	// 5. Build System Prompt
+	systemPrompt, err := o.buildSystemPrompt(ctxWindow, userCtx, execCtx, conversationHistory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build system prompt: %w", err)
 	}
 
-	// 5. Get all tools
+	// 6. Get all tools
 	allTools := tools.GetAllTools()
 
-	// 6. Think - Call LLM
+	// 7. Think - Call LLM
 	llmResponse, err := o.llm.Generate(ctx, systemPrompt, message, allTools)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate LLM response: %w", err)
@@ -137,6 +161,13 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 	// 6. Act - Execute tool calls
 	var toolResults []string
 	var embeds []Embed
+	// Start with preserved image data from previous turns
+	imageData := preservedImageData
+	imageName := preservedImageName
+	imageMeta := preservedImageMeta
+	if imageMeta == nil {
+		imageMeta = make(map[string]interface{})
+	}
 	if len(llmResponse.ToolCalls) > 0 {
 		for _, toolCall := range llmResponse.ToolCalls {
 			result := o.toolExecutor.Execute(ctx, execCtx, toolCall)
@@ -150,6 +181,43 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 				// Capture tool results for context
 				if result.Message != "" {
 					toolResults = append(toolResults, fmt.Sprintf("[%s]: %s", toolCall.Name, result.Message))
+				}
+
+				// Check for image data from image generation tool
+				if toolCall.Name == tools.ToolGenerateImageWithRunPod && result.Data != nil {
+					if dataMap, ok := result.Data.(map[string]interface{}); ok {
+						if imgData, ok := dataMap["image_data"].([]byte); ok && len(imgData) > 0 {
+							imageData = imgData
+							if format, ok := dataMap["image_format"].(string); ok {
+								imageName = fmt.Sprintf("image.%s", format)
+							} else {
+								imageName = "image.png"
+							}
+							
+							// Extract metadata for embed
+							imageMeta = make(map[string]interface{})
+							if seed, ok := dataMap["seed"]; ok {
+								imageMeta["seed"] = seed
+							}
+							if width, ok := dataMap["width"]; ok {
+								imageMeta["width"] = width
+							}
+							if height, ok := dataMap["height"]; ok {
+								imageMeta["height"] = height
+							}
+							if workflow, ok := dataMap["workflow"]; ok {
+								imageMeta["workflow"] = workflow
+							}
+							if elapsed, ok := dataMap["elapsed_seconds"]; ok {
+								imageMeta["elapsed_seconds"] = elapsed
+							}
+							
+							o.logger.Debug("Captured image data from tool result",
+								zap.Int("image_size", len(imageData)),
+								zap.String("image_name", imageName),
+							)
+						}
+					}
 				}
 
 				// For informational tools, use result data to build response and embeds
@@ -187,7 +255,8 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 				zap.Int("new_depth", depth+1),
 				zap.Int("tool_results", len(toolResults)),
 			)
-			return o.runTurnRecursive(ctx, execCtx, contextMessage, depth+1)
+			// Preserve image data through recursive call
+			return o.runTurnRecursiveWithImage(ctx, execCtx, contextMessage, depth+1, imageData, imageName, imageMeta)
 		}
 
 		// Default response if we hit max depth without content
@@ -245,6 +314,9 @@ func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.Exec
 		ToolCalls: llmResponse.ToolCalls,
 		Ignored:   false,
 		Embeds:    embeds,
+		ImageData: imageData,
+		ImageName: imageName,
+		ImageMeta: imageMeta,
 	}
 
 	return turnResult, nil

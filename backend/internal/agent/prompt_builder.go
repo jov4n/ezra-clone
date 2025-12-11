@@ -14,7 +14,7 @@ import (
 )
 
 // buildSystemPrompt creates a comprehensive system prompt with all context
-func (o *Orchestrator) buildSystemPrompt(ctxWindow *state.ContextWindow, userCtx *graph.UserContext, execCtx *tools.ExecutionContext) (string, error) {
+func (o *Orchestrator) buildSystemPrompt(ctxWindow *state.ContextWindow, userCtx *graph.UserContext, execCtx *tools.ExecutionContext, conversationHistory []graph.Message) (string, error) {
 	// Serialize agent state
 	agentStateJSON, err := json.MarshalIndent(ctxWindow, "", "  ")
 	if err != nil {
@@ -119,6 +119,42 @@ This is a persistent preference that should be remembered for all future convers
 		// If preferredLang is "en" or empty, no language section is added (English is default)
 	}
 
+	// Build conversation history section
+	conversationSection := ""
+	if len(conversationHistory) > 0 {
+		// Format the last few messages for context (show up to 10 most recent)
+		// Exclude the current message (it will be in the user message)
+		startIdx := 0
+		if len(conversationHistory) > 10 {
+			startIdx = len(conversationHistory) - 10
+		}
+		
+		var historyLines []string
+		for i := startIdx; i < len(conversationHistory); i++ {
+			msg := conversationHistory[i]
+			roleLabel := "User"
+			if msg.Role == "agent" {
+				roleLabel = "Assistant"
+			}
+			// Truncate very long messages to keep context manageable
+			content := msg.Content
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			historyLines = append(historyLines, fmt.Sprintf("- %s: %s", roleLabel, content))
+		}
+		if len(historyLines) > 0 {
+			conversationSection = fmt.Sprintf(`
+## Recent Conversation History
+
+The following are recent messages in this conversation (in chronological order):
+%s
+
+**CRITICAL**: Use this conversation history to maintain context. If the user's current message is a response to a previous question you asked (like "yes", "no", "proceed", etc.), you MUST refer back to the original request in the history above to understand what they're responding to.
+`, strings.Join(historyLines, "\n"))
+		}
+	}
+
 	// Get current date for context
 	currentDate := time.Now().Format("Monday, January 2, 2006")
 	currentYear := time.Now().Year()
@@ -130,7 +166,7 @@ You are %s, an intelligent AI agent with persistent memory and the ability to le
 
 ## Current Date
 Today is %s. When searching for current events or news, use "%s %d" or similar date context in your queries.
-%s%s
+%s%s%s
 ## Your Core State
 %s
 %s
@@ -227,7 +263,7 @@ If you can make a reasonable guess about what they want, JUST DO IT.
 ## Response Format
 
 USE TOOLS FIRST. Then provide a direct, helpful response with the information you found.
-`, constants.DefaultAgentID, constants.DefaultAgentID, currentDate, currentMonth, currentYear, mimicSection, languageSection, string(agentStateJSON), userSection, execCtx.Platform, execCtx.ChannelID)
+`, constants.DefaultAgentID, constants.DefaultAgentID, currentDate, currentMonth, currentYear, mimicSection, languageSection, conversationSection, string(agentStateJSON), userSection, execCtx.Platform, execCtx.ChannelID)
 
 	return prompt, nil
 }

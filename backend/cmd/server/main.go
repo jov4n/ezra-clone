@@ -57,6 +57,15 @@ func main() {
 	graphRepo := graph.NewRepository(driver)
 	llmAdapter := adapter.NewLLMAdapter(cfg.LiteLLMURL, cfg.OpenRouterAPIKey, cfg.ModelID)
 	agentOrch := agent.NewOrchestrator(graphRepo, llmAdapter)
+	
+	// Initialize ComfyUI executor (always initialize for prompt enhancement, RunPod optional for image generation)
+	comfyExecutor := tools.NewComfyExecutor(llmAdapter, cfg)
+	agentOrch.SetComfyExecutor(comfyExecutor)
+	if cfg.RunPodAPIKey != "" && cfg.RunPodEndpointID != "" {
+		log.Info("ComfyUI executor initialized with RunPod", zap.String("endpoint_id", cfg.RunPodEndpointID))
+	} else {
+		log.Info("ComfyUI executor initialized (prompt enhancement only, RunPod not configured)")
+	}
 
 	// Setup Gin router
 	if cfg.IsProduction() {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -72,6 +74,15 @@ func main() {
 	// Create Discord executor for Discord-specific tools
 	discordExecutor := tools.NewDiscordExecutor(dg, log)
 	agentOrch.SetDiscordExecutor(discordExecutor)
+	
+	// Initialize ComfyUI executor (always initialize for prompt enhancement, RunPod optional for image generation)
+	comfyExecutor := tools.NewComfyExecutor(llmAdapter, cfg)
+	agentOrch.SetComfyExecutor(comfyExecutor)
+	if cfg.RunPodAPIKey != "" && cfg.RunPodEndpointID != "" {
+		log.Info("ComfyUI executor initialized with RunPod", zap.String("endpoint_id", cfg.RunPodEndpointID))
+	} else {
+		log.Info("ComfyUI executor initialized (prompt enhancement only, RunPod not configured)")
+	}
 
 	// Add message handler
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -269,56 +280,138 @@ func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate, agentOrch *
 		return
 	}
 
-	// Send response - use embeds if available, otherwise plain text
-	if len(result.Embeds) > 0 {
-		// Convert agent embeds to Discord embeds
-		var discordEmbeds []*discordgo.MessageEmbed
-		for _, e := range result.Embeds {
-			embed := &discordgo.MessageEmbed{
-				Title:       e.Title,
-				Description: e.Description,
-				URL:         e.URL,
-				Color:       e.Color,
+	// Prepare message content
+	messageContent := result.Content
+	if len(messageContent) > constants.DiscordMaxMessageLength {
+		messageContent = messageContent[:constants.DiscordMaxMessageLength-3] + "..."
+	}
+
+	// Convert agent embeds to Discord embeds
+	var discordEmbeds []*discordgo.MessageEmbed
+	for _, e := range result.Embeds {
+		embed := &discordgo.MessageEmbed{
+			Title:       e.Title,
+			Description: e.Description,
+			URL:         e.URL,
+			Color:       e.Color,
+		}
+		
+		// Add fields if present
+		for _, f := range e.Fields {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   f.Name,
+				Value:  f.Value,
+				Inline: f.Inline,
+			})
+		}
+		
+		// Add footer if present
+		if e.Footer != "" {
+			embed.Footer = &discordgo.MessageEmbedFooter{
+				Text: e.Footer,
 			}
+		}
+		
+		discordEmbeds = append(discordEmbeds, embed)
+	}
+
+	// Prepare file attachment if image data is present
+	var files []*discordgo.File
+	var imageEmbed *discordgo.MessageEmbed
+	if len(result.ImageData) > 0 {
+		imageName := result.ImageName
+		if imageName == "" {
+			imageName = "image.png"
+		}
+		
+		// Create a file attachment
+		files = append(files, &discordgo.File{
+			Name:   imageName,
+			Reader: bytes.NewReader(result.ImageData),
+		})
+		
+		// Create a nice embed for the image
+		imageEmbed = &discordgo.MessageEmbed{
+			Title:       "🎨 Generated Image",
+			Description: messageContent,
+			Color:       0x5865F2, // Discord blurple color
+			Image: &discordgo.MessageEmbedImage{
+				URL: fmt.Sprintf("attachment://%s", imageName), // Reference the attached file
+			},
+			Footer: &discordgo.MessageEmbedFooter{
+				Text: "ComfyUI via RunPod",
+			},
+			Timestamp: time.Now().Format(time.RFC3339),
+		}
+		
+		// Add metadata fields if available
+		if result.ImageMeta != nil {
+			var fields []*discordgo.MessageEmbedField
 			
-			// Add fields if present
-			for _, f := range e.Fields {
-				embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-					Name:   f.Name,
-					Value:  f.Value,
-					Inline: f.Inline,
-				})
-			}
-			
-			// Add footer if present
-			if e.Footer != "" {
-				embed.Footer = &discordgo.MessageEmbedFooter{
-					Text: e.Footer,
+			if width, ok := result.ImageMeta["width"]; ok {
+				if height, ok := result.ImageMeta["height"]; ok {
+					fields = append(fields, &discordgo.MessageEmbedField{
+						Name:   "Dimensions",
+						Value:  fmt.Sprintf("%v × %v", width, height),
+						Inline: true,
+					})
 				}
 			}
 			
-			discordEmbeds = append(discordEmbeds, embed)
+			if seed, ok := result.ImageMeta["seed"]; ok {
+				fields = append(fields, &discordgo.MessageEmbedField{
+					Name:   "Seed",
+					Value:  fmt.Sprintf("%v", seed),
+					Inline: true,
+				})
+			}
+			
+			if elapsed, ok := result.ImageMeta["elapsed_seconds"]; ok {
+				if elapsedFloat, ok := elapsed.(float64); ok {
+					fields = append(fields, &discordgo.MessageEmbedField{
+						Name:   "Generation Time",
+						Value:  fmt.Sprintf("%.1fs", elapsedFloat),
+						Inline: true,
+					})
+				}
+			}
+			
+			if len(fields) > 0 {
+				imageEmbed.Fields = fields
+			}
 		}
 		
-		// Send message with embeds - truncate content if needed
-		content := result.Content
-		if len(content) > constants.DiscordMaxMessageLength {
-			content = content[:constants.DiscordMaxMessageLength-3] + "..."
+		// Add the image embed to the embeds list
+		discordEmbeds = append(discordEmbeds, imageEmbed)
+		
+		log.Debug("Attaching image to Discord message",
+			zap.String("filename", imageName),
+			zap.Int("size_bytes", len(result.ImageData)),
+		)
+	}
+
+	// Send message with embeds and/or file attachment
+	if len(discordEmbeds) > 0 || len(files) > 0 {
+		// If we have an image embed, don't send content separately (it's in the embed)
+		sendContent := messageContent
+		if imageEmbed != nil {
+			sendContent = "" // Image embed already has the description
 		}
 		
 		_, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-			Content: content,
+			Content: sendContent,
 			Embeds:  discordEmbeds,
+			Files:   files,
 		})
 		if err != nil {
-			log.Error("Failed to send embed message",
+			log.Error("Failed to send message with embeds/files",
 				zap.Error(err),
 				zap.String("channel_id", m.ChannelID),
 			)
 		}
-	} else if result.Content != "" {
+	} else if messageContent != "" {
 		// Plain text message - split if too long
-		sendLongMessage(s, m.ChannelID, result.Content, log)
+		sendLongMessage(s, m.ChannelID, messageContent, log)
 	}
 }
 

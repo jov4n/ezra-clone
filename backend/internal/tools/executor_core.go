@@ -41,6 +41,7 @@ type Executor struct {
 	httpClient      *http.Client
 	logger          *zap.Logger
 	discordExecutor *DiscordExecutor
+	comfyExecutor   *ComfyExecutor
 	mimicStates     map[string]*MimicState // key: agentID
 }
 
@@ -59,6 +60,11 @@ func NewExecutor(repo *graph.Repository) *Executor {
 // SetDiscordExecutor sets the Discord executor for Discord-specific tools
 func (e *Executor) SetDiscordExecutor(de *DiscordExecutor) {
 	e.discordExecutor = de
+}
+
+// SetComfyExecutor sets the ComfyUI executor for image generation tools
+func (e *Executor) SetComfyExecutor(ce *ComfyExecutor) {
+	e.comfyExecutor = ce
 }
 
 // GetMimicState returns the current mimic state for an agent
@@ -153,6 +159,16 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 		return e.executeRevertPersonality(ctx, execCtx)
 	case ToolAnalyzeUserStyle:
 		return e.executeAnalyzeUserStyle(ctx, execCtx, toolCall.Arguments)
+
+	// ComfyUI Image Generation Tools
+	case ToolGenerateImageWithRunPod:
+		return e.executeGenerateImageWithRunPod(ctx, execCtx, toolCall.Arguments)
+	case ToolEnhancePrompt:
+		return e.executeEnhancePrompt(ctx, execCtx, toolCall.Arguments)
+	case ToolSelectWorkflow:
+		return e.executeSelectWorkflow(ctx, execCtx, toolCall.Arguments)
+	case ToolListWorkflows:
+		return e.executeListWorkflows(ctx, execCtx, toolCall.Arguments)
 
 	default:
 		e.logger.Warn("Unknown tool", zap.String("tool", toolCall.Name))

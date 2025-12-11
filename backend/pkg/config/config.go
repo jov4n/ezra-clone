@@ -26,6 +26,12 @@ type Config struct {
 
 	// Discord
 	DiscordBotToken string
+
+	// RunPod
+	RunPodAPIKey     string
+	RunPodEndpointID string
+	ComfyUIWorkflowDir string
+	ComfyUIOutputDir   string
 }
 
 // Load reads configuration from environment variables
@@ -43,6 +49,10 @@ func Load() (*Config, error) {
 		ModelID:         getEnv("MODEL_ID", "openrouter/anthropic/claude-3.5-sonnet"),
 		OpenRouterAPIKey: getEnv("OPENROUTER_API_KEY", ""),
 		DiscordBotToken:  getEnv("DISCORD_BOT_TOKEN", ""),
+		RunPodAPIKey:     getEnv("RUNPOD_API_KEY", ""),
+		RunPodEndpointID: getEnv("RUNPOD_ENDPOINT_ID", ""),
+		ComfyUIWorkflowDir: getEnv("COMFYUI_WORKFLOW_DIR", ""),
+		ComfyUIOutputDir:   getEnv("COMFYUI_OUTPUT_DIR", "outputs"),
 	}
 
 	if err := cfg.Validate(); err != nil {
