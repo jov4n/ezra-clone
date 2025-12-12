@@ -1,16 +1,21 @@
 module ezra-clone
 
-go 1.22
+go 1.24.0
 
 require (
 	github.com/bwmarrin/discordgo v0.28.1
 	github.com/gin-gonic/gin v1.10.0
+	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/neo4j/neo4j-go-driver/v5 v5.20.0
 	github.com/sashabaranov/go-openai v1.24.0
 	github.com/stretchr/testify v1.9.0
 	go.uber.org/zap v1.27.0
+	golang.org/x/sync v0.19.0
 )
+
+// Use Richy-Z's fork with aead_aes256_gcm_rtpsize voice encryption fix (PR #1677)
+replace github.com/bwmarrin/discordgo => github.com/Richy-Z/discordgo v0.29.1-0.20251123191524-2672c0ec4dca
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
@@ -24,7 +29,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.20.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect

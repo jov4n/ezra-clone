@@ -42,6 +42,7 @@ type Executor struct {
 	logger          *zap.Logger
 	discordExecutor *DiscordExecutor
 	comfyExecutor   *ComfyExecutor
+	musicExecutor   *MusicExecutor
 	mimicStates     map[string]*MimicState // key: agentID
 }
 
@@ -65,6 +66,11 @@ func (e *Executor) SetDiscordExecutor(de *DiscordExecutor) {
 // SetComfyExecutor sets the ComfyUI executor for image generation tools
 func (e *Executor) SetComfyExecutor(ce *ComfyExecutor) {
 	e.comfyExecutor = ce
+}
+
+// SetMusicExecutor sets the music executor for music playback tools
+func (e *Executor) SetMusicExecutor(me *MusicExecutor) {
+	e.musicExecutor = me
 }
 
 // GetMimicState returns the current mimic state for an agent
@@ -170,6 +176,11 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 	case ToolListWorkflows:
 		return e.executeListWorkflows(ctx, execCtx, toolCall.Arguments)
 
+	// Music Tools
+	case ToolMusicPlay, ToolMusicPlaylist, ToolMusicQueue, ToolMusicSkip,
+		ToolMusicPause, ToolMusicResume, ToolMusicStop, ToolMusicVolume, ToolMusicRadio:
+		return e.executeMusicTool(ctx, execCtx, toolCall)
+
 	default:
 		e.logger.Warn("Unknown tool", zap.String("tool", toolCall.Name))
 		return &ToolResult{
@@ -177,5 +188,23 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 			Error:   fmt.Sprintf("Unknown tool: %s", toolCall.Name),
 		}
 	}
+}
+
+// executeMusicTool executes a music-related tool
+func (e *Executor) executeMusicTool(ctx context.Context, execCtx *ExecutionContext, toolCall adapter.ToolCall) *ToolResult {
+	if e.musicExecutor == nil {
+		return &ToolResult{
+			Success: false,
+			Error:   "Music executor not initialized",
+		}
+	}
+
+	// Parse arguments - Arguments is already a map[string]interface{}
+	args := make(map[string]interface{})
+	if toolCall.Arguments != nil {
+		args = toolCall.Arguments
+	}
+
+	return e.musicExecutor.ExecuteMusicTool(ctx, execCtx, toolCall.Name, args)
 }
 

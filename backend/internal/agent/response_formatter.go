@@ -158,35 +158,9 @@ func formatToolResponseWithEmbeds(toolName string, result *tools.ToolResult) (st
 		return result.Message, nil
 
 	case tools.ToolGetUserContext:
-		// Format user context into a readable response
-		if userCtx, ok := result.Data.(*graph.UserContext); ok {
-			var parts []string
-			
-			if len(userCtx.Facts) > 0 {
-				parts = append(parts, "Here's what I know about you:")
-				for _, fact := range userCtx.Facts {
-					parts = append(parts, fmt.Sprintf("• %s", fact.Content))
-				}
-			}
-			
-			if len(userCtx.Topics) > 0 {
-				var topicNames []string
-				for _, topic := range userCtx.Topics {
-					topicNames = append(topicNames, topic.Name)
-				}
-				if len(parts) > 0 {
-					parts = append(parts, "")
-				}
-				parts = append(parts, fmt.Sprintf("Your interests: %s", strings.Join(topicNames, ", ")))
-			}
-			
-			if len(parts) == 0 {
-				return "I don't have much information about you yet. Feel free to share something about yourself!", nil
-			}
-			
-			return strings.Join(parts, "\n"), nil
-		}
-		return result.Message, nil
+		// Don't pre-format - let the LLM format it conversationally based on the raw data
+		// The tool result message already contains the structured data
+		return "", nil
 
 	case tools.ToolSearchFacts:
 		// Format facts search results

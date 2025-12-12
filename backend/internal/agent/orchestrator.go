@@ -50,6 +50,11 @@ func (o *Orchestrator) SetComfyExecutor(ce *tools.ComfyExecutor) {
 	o.toolExecutor.SetComfyExecutor(ce)
 }
 
+// SetMusicExecutor sets the music executor for music playback tools
+func (o *Orchestrator) SetMusicExecutor(me *tools.MusicExecutor) {
+	o.toolExecutor.SetMusicExecutor(me)
+}
+
 // TurnResult represents the result of a single agent turn
 type TurnResult struct {
 	Content   string

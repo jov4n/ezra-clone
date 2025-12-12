@@ -84,13 +84,31 @@ func main() {
 		log.Info("ComfyUI executor initialized (prompt enhancement only, RunPod not configured)")
 	}
 
+	// Initialize Music executor
+	musicExecutor := tools.NewMusicExecutor(dg, log, cfg.OpenRouterAPIKey)
+	agentOrch.SetMusicExecutor(musicExecutor)
+	log.Info("Music executor initialized")
+
 	// Add message handler
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		handleMessage(s, m, agentOrch, graphRepo, log)
 	})
 
-	// Set intents
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages
+	// Set intents (including voice state for music bot)
+	// Required intents:
+	// - IntentsGuilds: Access to guild information
+	// - IntentsGuildMessages: Read messages in guild channels
+	// - IntentsDirectMessages: Read DM messages
+	// - IntentsGuildVoiceStates: Track voice state changes (REQUIRED for voice connections)
+	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsGuildVoiceStates
+	
+	// Log intents for debugging
+	log.Info("Discord bot intents configured",
+		zap.Bool("guilds", (dg.Identify.Intents&discordgo.IntentsGuilds) != 0),
+		zap.Bool("guild_messages", (dg.Identify.Intents&discordgo.IntentsGuildMessages) != 0),
+		zap.Bool("direct_messages", (dg.Identify.Intents&discordgo.IntentsDirectMessages) != 0),
+		zap.Bool("guild_voice_states", (dg.Identify.Intents&discordgo.IntentsGuildVoiceStates) != 0),
+	)
 
 	// Open connection
 	if err := dg.Open(); err != nil {
