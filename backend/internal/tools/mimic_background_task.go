@@ -3,9 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"strings"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"ezra-clone/backend/internal/adapter"
@@ -52,10 +50,9 @@ func (m *MimicBackgroundTask) Start(agentID string) {
 	// Register message handler for responding to posts
 	m.discordSession.AddHandler(m.handleChannelMessage)
 
-	go m.runLoop(agentID)
-
 	m.logger.Info("Mimic background task started",
 		zap.String("agent_id", agentID),
+		zap.String("mimic_channel_id", m.config.MimicChannelID),
 	)
 }
 
@@ -66,7 +63,9 @@ func (m *MimicBackgroundTask) Stop() {
 	}
 
 	m.running = false
-	close(m.stopChan)
+	if m.stopChan != nil {
+		close(m.stopChan)
+	}
 
 	// Note: Discord handlers can't be easily removed, but we check m.running in handleChannelMessage
 	// so it will effectively stop responding
@@ -76,8 +75,27 @@ func (m *MimicBackgroundTask) Stop() {
 	)
 }
 
-// handleChannelMessage handles messages in the mimic channel and randomly responds
+// handleChannelMessage handles messages in the mimic channel and intelligently responds
 func (m *MimicBackgroundTask) handleChannelMessage(s *discordgo.Session, msg *discordgo.MessageCreate) {
+	// Log ALL messages for debugging (to see if handler is being called)
+	m.logger.Debug("Mimic handler checking message",
+		zap.String("channel_id", msg.ChannelID),
+		zap.String("expected_channel_id", m.config.MimicChannelID),
+		zap.String("author", msg.Author.Username),
+		zap.Bool("is_match", msg.ChannelID == m.config.MimicChannelID),
+		zap.Bool("running", m.running),
+	)
+
+	// Log messages in the target channel at Info level
+	if msg.ChannelID == m.config.MimicChannelID {
+		m.logger.Info("Mimic handler received message in target channel",
+			zap.String("channel_id", msg.ChannelID),
+			zap.String("author", msg.Author.Username),
+			zap.String("content", msg.Content),
+			zap.Bool("running", m.running),
+		)
+	}
+
 	// Only process messages in the configured mimic channel
 	if msg.ChannelID != m.config.MimicChannelID {
 		return
@@ -103,28 +121,72 @@ func (m *MimicBackgroundTask) handleChannelMessage(s *discordgo.Session, msg *di
 		return
 	}
 
-	// Randomly decide whether to respond (30% chance)
-	if rand.Float32() > 0.3 {
-		return
-	}
-
 	// Get mimic state
 	mimicState := m.executor.GetMimicState(m.agentID)
 	if mimicState == nil || !mimicState.Active || mimicState.MimicProfile == nil {
+		m.logger.Info("Mimic state not active, skipping",
+			zap.String("agent_id", m.agentID),
+			zap.Bool("state_exists", mimicState != nil),
+			zap.Bool("state_active", mimicState != nil && mimicState.Active),
+			zap.Bool("has_profile", mimicState != nil && mimicState.MimicProfile != nil),
+		)
 		return
 	}
 
 	profile := mimicState.MimicProfile
+	ctx := context.Background()
+
+	// Check if this is a direct reply to the bot
+	isDirectReply := false
+	if msg.MessageReference != nil && msg.MessageReference.MessageID != "" {
+		// Fetch the referenced message to check if it's from the bot
+		referencedMsg, err := s.ChannelMessage(msg.ChannelID, msg.MessageReference.MessageID)
+		if err == nil && referencedMsg != nil && referencedMsg.Author != nil {
+			if referencedMsg.Author.ID == s.State.User.ID {
+				isDirectReply = true
+				m.logger.Info("Detected direct reply to bot",
+					zap.String("agent_id", m.agentID),
+					zap.String("channel_id", msg.ChannelID),
+					zap.String("responding_to_user", msg.Author.Username),
+				)
+			}
+		}
+	}
+
+	// Always respond if directly replied to, otherwise let LM decide
+	if !isDirectReply {
+		// Use LM to decide if we should respond
+		shouldRespond, err := m.shouldRespondToMessage(ctx, profile, msg.Content, msg.ChannelID)
+		if err != nil {
+			m.logger.Warn("Failed to determine if should respond",
+				zap.Error(err),
+			)
+			// On error, don't respond to avoid spam
+			return
+		}
+		if !shouldRespond {
+			return
+		}
+	}
 
 	m.logger.Info("Mimic responding to message",
 		zap.String("agent_id", m.agentID),
 		zap.String("channel_id", msg.ChannelID),
 		zap.String("responding_to_user", msg.Author.Username),
+		zap.Bool("is_direct_reply", isDirectReply),
 	)
 
-	// Generate response in user's style
-	ctx := context.Background()
-	response, err := m.generateResponseToMessage(ctx, profile, msg.Content, msg.Author.Username)
+	// Get recent channel context for intelligent responses
+	channelContext, err := m.getChannelContext(ctx, msg.ChannelID, 10)
+	if err != nil {
+		m.logger.Warn("Failed to get channel context, continuing without it",
+			zap.Error(err),
+		)
+		channelContext = ""
+	}
+
+	// Generate response in user's style with channel context
+	response, err := m.generateResponseToMessage(ctx, profile, msg.Content, msg.Author.Username, channelContext)
 	if err != nil {
 		m.logger.Error("Failed to generate response",
 			zap.Error(err),
@@ -147,328 +209,142 @@ func (m *MimicBackgroundTask) handleChannelMessage(s *discordgo.Session, msg *di
 	)
 }
 
-// runLoop runs the main loop that posts at random intervals
-func (m *MimicBackgroundTask) runLoop(agentID string) {
-	for {
-		// Random interval between 20 minutes and 1 hour
-		interval := time.Duration(20+rand.Intn(40)) * time.Minute
-
-		select {
-		case <-m.stopChan:
-			return
-		case <-time.After(interval):
-			// Check if still mimicking
-			if !m.executor.IsMimicking(agentID) {
-				m.logger.Debug("Mimic mode deactivated, stopping background task")
-				m.running = false
-				return
-			}
-
-			// Generate and post content
-			if err := m.generateAndPost(agentID); err != nil {
-				m.logger.Error("Failed to generate and post content",
-					zap.String("agent_id", agentID),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-}
-
-// generateAndPost generates interesting content and posts it
-func (m *MimicBackgroundTask) generateAndPost(agentID string) error {
-	ctx := context.Background()
-
-	// Get mimic state
-	mimicState := m.executor.GetMimicState(agentID)
-	if mimicState == nil || !mimicState.Active || mimicState.MimicProfile == nil {
-		return fmt.Errorf("mimic state not active")
+// shouldRespondToMessage uses the LM to decide if we should respond to a message
+func (m *MimicBackgroundTask) shouldRespondToMessage(ctx context.Context, profile *PersonalityProfile, messageContent, channelID string) (bool, error) {
+	// Get recent channel context
+	channelContext, err := m.getChannelContext(ctx, channelID, 10)
+	if err != nil {
+		// If we can't get context, still try to decide
+		channelContext = ""
 	}
 
-	profile := mimicState.MimicProfile
-	channelID := m.config.MimicChannelID
-	if channelID == "" {
-		return fmt.Errorf("mimic channel ID not configured")
+	// Create the ignore_message tool
+	ignoreTool := adapter.Tool{
+		Type: "function",
+		Function: adapter.FunctionDefinition{
+			Name:        "ignore_message",
+			Description: "ONLY call this tool if the message is completely irrelevant, spam, or something you would absolutely never respond to. For normal conversation, questions, greetings, or anything you might naturally engage with, DO NOT call this tool.",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
+			},
+		},
 	}
 
-	m.logger.Info("Generating content for mimic post",
-		zap.String("agent_id", agentID),
-		zap.String("mimicking_user", profile.Username),
-		zap.String("channel_id", channelID),
+	contextSection := ""
+	if channelContext != "" {
+		contextSection = fmt.Sprintf("\n\nRecent channel context:\n%s", channelContext)
+	}
+
+	// Use the personality profile's perspective - you ARE this person, not a bot
+	prompt := fmt.Sprintf(`Someone posted this message in the Discord channel:
+
+"%s"%s
+
+Think about whether YOU (as yourself) would naturally respond to this. Consider:
+- Would you respond to a greeting or casual conversation?
+- Would you respond to a question (even if not directly at you)?
+- Would you respond if someone mentioned you or your name?
+- Would you respond if it's about something you're interested in?
+- Would you respond if it's part of a conversation you're following?
+
+ONLY call ignore_message if:
+- The message is spam or completely irrelevant to you
+- It's a bot command or system message
+- It's something you would absolutely never respond to
+
+For normal conversation, questions, or anything you might naturally engage with, DO NOT call ignore_message - just don't call any tool and we'll generate a response.`,
+		messageContent,
+		contextSection,
 	)
 
-	// Randomly decide whether to search the web (50% chance)
-	shouldSearch := rand.Float32() < 0.5
-	var postMessage string
-	var err error
+	// Use the style prompt as system prompt - this makes the LLM think AS the person, not as a bot
+	// The style prompt already says "You ARE [username]" and includes all their personality traits
+	response, err := m.llm.Generate(ctx, profile.StylePrompt, prompt, []adapter.Tool{ignoreTool})
+	if err != nil {
+		return false, err
+	}
 
-	if shouldSearch {
-		// Generate a search query based on user's interests
-		searchQuery, err := m.generateSearchQuery(ctx, profile)
-		if err != nil {
-			m.logger.Warn("Failed to generate search query, falling back to direct post",
-				zap.Error(err),
+	// Check if the ignore_message tool was called
+	for _, toolCall := range response.ToolCalls {
+		if toolCall.Name == "ignore_message" {
+			m.logger.Debug("LM decided to ignore message",
+				zap.String("agent_id", m.agentID),
+				zap.String("channel_id", channelID),
+				zap.String("message_preview", truncateString(messageContent, 50)),
 			)
-			shouldSearch = false
-		} else {
-			// Search the web
-			searchResult := m.executor.executeWebSearch(ctx, map[string]interface{}{
-				"query": searchQuery,
-			})
-			if !searchResult.Success {
-				m.logger.Warn("Web search failed, falling back to direct post",
-					zap.String("error", searchResult.Error),
-				)
-				shouldSearch = false
-			} else {
-				// Extract search results
-				searchData, ok := searchResult.Data.(map[string]interface{})
-				if !ok {
-					m.logger.Warn("Invalid search result format, falling back to direct post")
-					shouldSearch = false
-				} else {
-					resultsRaw, ok := searchData["results"]
-					if !ok {
-						m.logger.Warn("No results in search data, falling back to direct post")
-						shouldSearch = false
-					} else {
-						// Parse results - could be []SearchResult or []interface{}
-						var title, url, snippet string
-						
-						switch results := resultsRaw.(type) {
-						case []SearchResult:
-							if len(results) == 0 {
-								m.logger.Warn("No search results found, falling back to direct post")
-								shouldSearch = false
-							} else {
-								firstResult := results[0]
-								title = firstResult.Title
-								url = firstResult.URL
-								snippet = firstResult.Snippet
-							}
-						case []interface{}:
-							if len(results) == 0 {
-								m.logger.Warn("No search results found, falling back to direct post")
-								shouldSearch = false
-							} else {
-								firstResult, ok := results[0].(map[string]interface{})
-								if !ok {
-									m.logger.Warn("Invalid result format, falling back to direct post")
-									shouldSearch = false
-								} else {
-									title, _ = firstResult["title"].(string)
-									url, _ = firstResult["url"].(string)
-									snippet, _ = firstResult["snippet"].(string)
-								}
-							}
-						default:
-							m.logger.Warn("Unexpected results type, falling back to direct post")
-							shouldSearch = false
-						}
-
-						if shouldSearch && (title == "" || url == "") {
-							m.logger.Warn("Invalid search result: missing title or URL, falling back to direct post")
-							shouldSearch = false
-						}
-
-						if shouldSearch {
-							// Generate a post message in the user's style with the article
-							postMessage, err = m.generatePostMessage(ctx, profile, title, url, snippet)
-							if err != nil {
-								m.logger.Warn("Failed to generate post message from search, falling back to direct post",
-									zap.Error(err),
-								)
-								shouldSearch = false
-							}
-						}
-					}
-				}
-			}
+			return false, nil
 		}
 	}
 
-	// If we didn't search or search failed, generate a direct post
-	if !shouldSearch {
-		postMessage, err = m.generateDirectPost(ctx, profile)
-		if err != nil {
-			return fmt.Errorf("failed to generate direct post: %w", err)
-		}
-	}
-
-	// Post to Discord
-	_, err = m.discordSession.ChannelMessageSend(channelID, postMessage)
-	if err != nil {
-		return fmt.Errorf("failed to post message: %w", err)
-	}
-
-	m.logger.Info("Mimic post sent successfully",
-		zap.String("agent_id", agentID),
+	// No ignore tool was called, so we should respond
+	m.logger.Debug("LM decided to respond to message",
+		zap.String("agent_id", m.agentID),
 		zap.String("channel_id", channelID),
-		zap.Bool("used_web_search", shouldSearch),
+		zap.String("message_preview", truncateString(messageContent, 50)),
 	)
-
-	return nil
+	return true, nil
 }
 
-// generateSearchQuery uses LLM to generate a search query based on user's interests
-func (m *MimicBackgroundTask) generateSearchQuery(ctx context.Context, profile *PersonalityProfile) (string, error) {
-	// Build prompt based on user's interests from profile
-	prompt := fmt.Sprintf(`Based on this user's communication style and interests, generate a search query for something they would find fascinating or want to share.
+// getChannelContext retrieves recent messages from the channel for context
+func (m *MimicBackgroundTask) getChannelContext(ctx context.Context, channelID string, limit int) (string, error) {
+	if m.executor.discordExecutor == nil {
+		return "", fmt.Errorf("discord executor not available")
+	}
 
-User profile:
-- Common words/phrases: %s
-- Tone: %s
-- Interests (from messages): %s
-
-Generate a single, specific search query (2-5 words) for something interesting, recent, or relevant that this person would want to share. Examples: "AI breakthroughs 2024", "new game releases", "tech news", "programming tips", "music releases".
-
-Search query:`, 
-		joinStrings(profile.CommonWords, ", "),
-		joinStrings(profile.ToneIndicators, ", "),
-		joinStrings(profile.CommonPhrases, ", "),
-	)
-
-	// Use LLM to generate query
-	systemPrompt := "You are a helpful assistant that generates search queries. Respond with only the search query, nothing else."
-	response, err := m.llm.Generate(ctx, systemPrompt, prompt, []adapter.Tool{})
+	messages, err := m.executor.discordExecutor.ReadChannelHistory(ctx, channelID, limit, "")
 	if err != nil {
 		return "", err
 	}
 
-	query := response.Content
-	if query == "" {
-		// Fallback to a generic query based on common words
-		if len(profile.CommonWords) > 0 {
-			query = profile.CommonWords[0] + " news"
-		} else {
-			query = "interesting news"
+	if len(messages) == 0 {
+		return "No recent messages in channel.", nil
+	}
+
+	var contextLines []string
+	for _, msg := range messages {
+		// Skip very long messages
+		content := msg.Content
+		if len(content) > 200 {
+			content = content[:200] + "..."
 		}
+		contextLines = append(contextLines, fmt.Sprintf("- %s: %s", msg.Author, content))
 	}
 
-	// Clean up the query
-	query = cleanQuery(query)
-
-	return query, nil
+	return strings.Join(contextLines, "\n"), nil
 }
 
-// generatePostMessage generates a post in the user's style
-func (m *MimicBackgroundTask) generatePostMessage(ctx context.Context, profile *PersonalityProfile, title, url, snippet string) (string, error) {
-	prompt := fmt.Sprintf(`You are posting as %s. Write a short Discord message (1-2 sentences max) sharing this article in their style.
 
-Article:
-Title: %s
-URL: %s
-Snippet: %s
+// generateResponseToMessage generates a response to a message in the user's style with channel context
+func (m *MimicBackgroundTask) generateResponseToMessage(ctx context.Context, profile *PersonalityProfile, originalMessage, authorUsername, channelContext string) (string, error) {
+	contextSection := ""
+	if channelContext != "" {
+		contextSection = fmt.Sprintf(`
 
-Style guidelines:
-- Capitalization: %s
-- Punctuation: %s
-- Tone: %s
-- Common phrases: %s
-- Emoji usage: %s
+Recent channel context (for understanding the conversation):
+%s
 
-Write a casual, engaging message that they would write. Include the URL. Keep it authentic to their style.`,
-		profile.Username,
-		title,
-		url,
-		snippet,
-		profile.Capitalization,
-		profile.PunctuationStyle,
-		joinStrings(profile.ToneIndicators, ", "),
-		joinStrings(profile.CommonPhrases, ", "),
-		joinStrings(profile.EmojiUsage, " "),
-	)
-
-	// Use the style prompt as system prompt and the post request as user message
-	response, err := m.llm.Generate(ctx, profile.StylePrompt, prompt, []adapter.Tool{})
-	if err != nil {
-		return "", err
+`, channelContext)
 	}
 
-	message := response.Content
-	if message == "" {
-		// Fallback message
-		message = fmt.Sprintf("%s\n%s", title, url)
-	}
-
-	return message, nil
-}
-
-// generateDirectPost generates a post without web search - just something the user would naturally post
-func (m *MimicBackgroundTask) generateDirectPost(ctx context.Context, profile *PersonalityProfile) (string, error) {
-	prompt := fmt.Sprintf(`You are %s. Write a short Discord message (1-2 sentences max) that they would naturally post. This could be:
-- A thought or observation
-- A reaction to something
-- A casual comment
-- Something they find interesting or want to share
-- A random thought
-
-Style guidelines:
-- Capitalization: %s
-- Punctuation: %s
-- Tone: %s
-- Common phrases: %s
-- Emoji usage: %s
-
-Write something authentic to their style. Don't reference external links or articles - just a natural post they would make.`,
-		profile.Username,
-		profile.Capitalization,
-		profile.PunctuationStyle,
-		joinStrings(profile.ToneIndicators, ", "),
-		joinStrings(profile.CommonPhrases, ", "),
-		joinStrings(profile.EmojiUsage, " "),
-	)
-
-	// Use the style prompt as system prompt and the post request as user message
-	response, err := m.llm.Generate(ctx, profile.StylePrompt, prompt, []adapter.Tool{})
-	if err != nil {
-		return "", err
-	}
-
-	message := response.Content
-	if message == "" {
-		// Fallback message based on common phrases
-		if len(profile.CommonPhrases) > 0 {
-			message = profile.CommonPhrases[0] + "..."
-		} else if len(profile.CommonWords) > 0 {
-			message = profile.CommonWords[0] + " is interesting"
-		} else {
-			message = "hmm"
-		}
-	}
-
-	return message, nil
-}
-
-// generateResponseToMessage generates a response to a message in the user's style
-func (m *MimicBackgroundTask) generateResponseToMessage(ctx context.Context, profile *PersonalityProfile, originalMessage, authorUsername string) (string, error) {
-	prompt := fmt.Sprintf(`You are %s. Someone posted this message in the channel:
+	// Write from the perspective of BEING this person, not mimicking them
+	prompt := fmt.Sprintf(`Someone posted this message in the Discord channel:
 
 "%s" (by %s)
-
-Write a short response (1-2 sentences max) that they would naturally post. This could be:
+%s
+Write a short response (1-2 sentences max) that YOU would naturally post. This could be:
 - A reaction or comment
 - Agreement or disagreement
 - A question
 - A related thought
 - A casual response
+- Something relevant to the ongoing conversation
 
-Style guidelines:
-- Capitalization: %s
-- Punctuation: %s
-- Tone: %s
-- Common phrases: %s
-- Emoji usage: %s
-
-Write something authentic to their style. Keep it natural and conversational.`,
-		profile.Username,
+Write naturally as yourself - be authentic to your own communication style and respond as you normally would.`,
 		originalMessage,
 		authorUsername,
-		profile.Capitalization,
-		profile.PunctuationStyle,
-		joinStrings(profile.ToneIndicators, ", "),
-		joinStrings(profile.CommonPhrases, ", "),
-		joinStrings(profile.EmojiUsage, " "),
+		contextSection,
 	)
 
 	// Use the style prompt as system prompt and the response request as user message
