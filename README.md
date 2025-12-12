@@ -108,6 +108,28 @@ Both the HTTP server and Discord bot use the same shared codebase:
   - Read message history from channels
   - Get user and channel information
   - Search messages in Discord
+  - Read and analyze codebase from Discord channels
+
+- **Music Bot** (Discord only)
+  - Play music from YouTube, Spotify, and SoundCloud
+  - Generate AI playlists based on user requests
+  - Queue management with pagination
+  - Playback controls (play, pause, resume, skip, stop)
+  - Volume control
+  - Radio mode with automatic playlist generation
+  - Rich embeds showing now playing and queue status
+
+- **Image Generation** (Discord only, requires RunPod)
+  - Generate images using ComfyUI workflows
+  - AI-powered prompt enhancement using Z-Image Turbo template
+  - Workflow selection and customization
+  - Integration with RunPod for GPU-accelerated generation
+  - Support for custom ComfyUI workflows
+
+- **Personality Mimicking**
+  - Analyze and mimic user communication styles
+  - Background task for automatic personality adaptation
+  - Revert to original personality when needed
 
 ### Frontend Dashboard Features
 
@@ -139,22 +161,37 @@ Both the HTTP server and Discord bot use the same shared codebase:
   - Quick access to agent's identity and instructions
   - Real-time updates when memory changes
 
+- **Agent Management**
+  - Create and manage multiple agents
+  - Switch between agents seamlessly
+  - Agent-specific configuration (model, system instructions)
+  - View agent context statistics
+
+- **Context Window Panel**
+  - Real-time view of agent's complete context
+  - Browse archival memories, facts, topics, and users
+  - Create and delete archival memories
+  - View conversation history and messages
+
 ## Tech Stack
 
-- **Backend**: Go 1.22+, gin-gonic (HTTP), discordgo, neo4j-go-driver
+- **Backend**: Go 1.24+, gin-gonic (HTTP), discordgo, neo4j-go-driver
 - **AI Layer**: OpenAI Protocol (via go-openai) → LiteLLM Proxy → OpenRouter (Claude 3.5 Sonnet)
 - **Database**: Neo4j 5.19 (Graph DB) with vector indexing
 - **Frontend**: Next.js 14 (App Router), TypeScript, TailwindCSS
 - **Infrastructure**: Docker Compose
 - **Logging**: Zap (structured logging)
+- **Image Generation**: ComfyUI workflows via RunPod API
+- **Music**: Discord voice connections with YouTube, Spotify, SoundCloud support
 
 ## Prerequisites
 
-- **Go 1.22+** - [Download](https://go.dev/dl/)
+- **Go 1.24+** - [Download](https://go.dev/dl/)
 - **Node.js 18+** - [Download](https://nodejs.org/)
 - **Docker & Docker Compose** - [Download](https://www.docker.com/products/docker-desktop)
 - **OpenRouter API Key** - [Get one here](https://openrouter.ai/) (free tier available)
 - **Discord Bot Token** (optional) - [Create a bot](https://discord.com/developers/applications)
+- **RunPod API Key & Endpoint ID** (optional, for image generation) - [Get one here](https://www.runpod.io/)
 
 ## Quick Start
 
@@ -193,6 +230,13 @@ MODEL_ID=openrouter/anthropic/claude-3.5-sonnet
 
 # Discord Bot (only if using Discord bot)
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
+MIMIC_CHANNEL_ID=your_channel_id_for_mimic_mode
+
+# RunPod (optional, for image generation)
+RUNPOD_API_KEY=your_runpod_api_key
+RUNPOD_ENDPOINT_ID=your_endpoint_id
+COMFYUI_WORKFLOW_DIR=path/to/workflows
+COMFYUI_OUTPUT_DIR=outputs
 ```
 
 Edit `deploy/.env`:
@@ -304,6 +348,26 @@ ezra-clone/
 
 ## API Endpoints
 
+### Agent Management
+
+**GET** `/api/agents`
+List all available agents.
+
+**POST** `/api/agents`
+Create a new agent.
+
+**GET** `/api/agent/:id/config`
+Get agent configuration (model, system instructions).
+
+**PUT** `/api/agent/:id/config`
+Update agent configuration.
+
+**GET** `/api/agent/:id/tools`
+Get all available tools for the agent.
+
+**GET** `/api/agent/:id/context`
+Get context window statistics (token counts, memory sizes).
+
 ### Agent State
 
 **GET** `/api/agent/:id/state`
@@ -353,7 +417,7 @@ Response:
 }
 ```
 
-### Memory Update
+### Memory Management
 
 **POST** `/api/memory/:id/update`
 Manually updates a memory block.
@@ -365,6 +429,38 @@ Request:
   "content": "I am Jarvis, a helpful assistant."
 }
 ```
+
+**DELETE** `/api/memory/:id/block/:blockName`
+Delete a memory block.
+
+**GET** `/api/agent/:id/archival-memories`
+Get all archival memories for an agent.
+
+**POST** `/api/agent/:id/archival-memories`
+Create a new archival memory.
+
+**DELETE** `/api/agent/:id/archival-memories/:memoryId`
+Delete an archival memory.
+
+### Data Access
+
+**GET** `/api/agent/:id/facts`
+Get all facts for an agent.
+
+**GET** `/api/agent/:id/topics`
+Get all topics for an agent.
+
+**GET** `/api/agent/:id/users`
+Get all users for an agent.
+
+**GET** `/api/agent/:id/messages`
+Get all messages for an agent (with optional `limit` query parameter).
+
+**GET** `/api/agent/:id/conversations`
+Get all conversations for an agent (with optional `limit` query parameter).
+
+**GET** `/api/agent/:id/conversation-history`
+Get conversation history for a specific channel (with `channel_id` and optional `limit` query parameters).
 
 ## Agent Capabilities
 
@@ -380,6 +476,7 @@ The agent has access to a comprehensive set of tools organized into categories:
 ### Knowledge Management
 - `create_fact` - Store facts and link them to topics/users
 - `search_facts` - Search for facts about specific topics
+- `link_fact_to_user` - Associate a fact with a specific user
 - `get_user_context` - Get comprehensive information about a user
 
 ### Topic Management
@@ -397,6 +494,7 @@ The agent has access to a comprehensive set of tools organized into categories:
 - `discord_get_user_info` - Get information about a Discord user
 - `discord_get_channel_info` - Get information about a Discord channel
 - `discord_search_messages` - Search messages in Discord
+- `read_codebase` - Read and analyze codebase files from Discord channels
 
 ### Web & External Tools
 - `web_search` - Search the web for information
@@ -410,6 +508,23 @@ The agent has access to a comprehensive set of tools organized into categories:
 - `mimic_personality` - Analyze and mimic a user's communication style
 - `revert_personality` - Stop mimicking and return to normal personality
 - `analyze_user_style` - Analyze a user's communication style
+
+### Music Tools (Discord bot only)
+- `music_play` - Play music from URL or search query (YouTube, Spotify, SoundCloud)
+- `music_playlist` - Generate and play AI-generated playlists
+- `music_queue` - View and manage the music queue
+- `music_skip` - Skip to the next song
+- `music_pause` - Pause playback
+- `music_resume` - Resume playback
+- `music_stop` - Stop playback and clear queue
+- `music_volume` - Adjust playback volume
+- `music_radio` - Enable radio mode with automatic playlist generation
+
+### Image Generation Tools (Discord bot only, requires RunPod)
+- `enhance_prompt` - Enhance image generation prompts using Z-Image Turbo template
+- `list_workflows` - List available ComfyUI workflow templates
+- `select_workflow` - Select and customize a workflow for image generation
+- `generate_image_with_runpod` - Generate images using ComfyUI on RunPod
 
 ## Usage Examples
 
@@ -432,13 +547,35 @@ The agent has access to a comprehensive set of tools organized into categories:
    @Ezra what do you know about @user?
    ```
 
+5. **Play music**:
+   ```
+   @Ezra play Never Gonna Give You Up
+   @Ezra generate a playlist of 80s rock songs
+   @Ezra queue
+   @Ezra skip
+   ```
+
+6. **Generate images** (requires RunPod configuration):
+   ```
+   @Ezra generate an image of a futuristic city at sunset
+   ```
+
+7. **Read codebase**:
+   ```
+   @Ezra read the codebase from this channel
+   ```
+
 ### Frontend Dashboard
 
 1. **Open** `http://localhost:3000`
-2. **Chat** with the agent in the center panel
-3. **View state** - See the agent's complete context in the right sidebar
-4. **Edit memory** - Click on memory blocks to edit them directly
-5. **Monitor tools** - See tool calls and results in the chat interface
+2. **Select or create an agent** - Use the agent dropdown or create a new one
+3. **Chat** with the agent in the center panel
+4. **View state** - See the agent's complete context in the right sidebar
+5. **Edit memory** - Click on memory blocks to edit them directly
+6. **Manage archival memories** - Create, view, and delete archival memories
+7. **Monitor tools** - See tool calls and results in the chat interface
+8. **Configure agent** - Adjust model settings and system instructions in the left sidebar
+9. **Browse data** - View facts, topics, users, messages, and conversations
 
 ## Testing
 
@@ -539,17 +676,39 @@ go run backend/scripts/migrate_enhanced_schema.go
 
 ### Backend Issues
 - Verify all environment variables are set correctly
-- Check Go version: `go version` (requires 1.22+)
+- Check Go version: `go version` (requires 1.24+)
 - Run tests: `go test ./...`
 - Check logs for detailed error messages
 - Verify Neo4j and LiteLLM are accessible
 
 ### Discord Bot Issues
 - Verify `DISCORD_BOT_TOKEN` is set in `.env`
-- Check bot has proper intents enabled in Discord Developer Portal
-- Ensure bot has permissions in the server/channel
+- Check bot has proper intents enabled in Discord Developer Portal:
+  - `GUILDS` - Access to guild information
+  - `GUILD_MESSAGES` - Read messages in guild channels
+  - `DIRECT_MESSAGES` - Read DM messages
+  - `GUILD_VOICE_STATES` - Required for music bot functionality
+- Ensure bot has permissions in the server/channel:
+  - Read messages
+  - Send messages
+  - Connect to voice channels (for music)
+  - Speak in voice channels (for music)
 - Check bot logs for connection errors
 - Verify bot is online in Discord
+
+### Music Bot Issues
+- Ensure bot has voice channel permissions
+- Check that bot can join your voice channel
+- Verify OpenRouter API key is set (required for AI playlist generation)
+- Check music executor logs for playback errors
+- Ensure YouTube, Spotify, or SoundCloud URLs are valid
+
+### Image Generation Issues
+- Verify `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` are set in `.env`
+- Check RunPod endpoint is active and accessible
+- Verify ComfyUI workflow directory path is correct (if using custom workflows)
+- Check ComfyUI executor logs for generation errors
+- Ensure OpenRouter API key is set (required for prompt enhancement)
 
 ## Additional Documentation
 
@@ -571,6 +730,9 @@ MIT
 - Uses [LiteLLM](https://github.com/BerriAI/litellm) for LLM proxy
 - Graph database powered by [Neo4j](https://neo4j.com/)
 - Frontend built with [Next.js](https://nextjs.org/) and [TailwindCSS](https://tailwindcss.com/)
+- Image generation powered by [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and [RunPod](https://www.runpod.io/)
+- Music playback uses [discordgo](https://github.com/bwmarrin/discordgo) with voice support
+- Prompt enhancement based on [Z-Image Turbo](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo) template
 
 ---
 

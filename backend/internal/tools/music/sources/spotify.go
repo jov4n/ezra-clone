@@ -15,27 +15,37 @@ import (
 )
 
 // FetchSpotifyPlaylist fetches songs from a Spotify playlist/track and converts to YouTube
-func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []Song {
+func FetchSpotifyPlaylist(ctx context.Context, spotifyURL, requester string, songChan chan<- Song) ([]Song, error) {
 	var tracks []string
 
-	maxDurationSeconds := 360 // 6 minutes max for playlists
+	maxDurationSeconds := MaxSongDurationSeconds
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), PlaylistFetchTimeout*time.Second)
+		defer cancel()
+	}
+
 	if strings.Contains(spotifyURL, "track") {
 		// Single track
-		trackName := extractSpotifyTrackName(spotifyURL)
-		if trackName != "" {
-			song := SearchYouTube(trackName, requester) // SearchYouTube is in youtube.go
-			if song.Title != "" {
+		trackName, err := extractSpotifyTrackName(ctx, spotifyURL)
+		if err == nil && trackName != "" {
+			song, err := SearchYouTubeWithContext(ctx, trackName, requester)
+			if err == nil && !song.IsEmpty() {
 				if IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
 					if songChan != nil {
 						songChan <- song
 					}
-					return []Song{song}
+					return []Song{song}, nil
 				}
 			}
 		}
 	} else if strings.Contains(spotifyURL, "playlist") || strings.Contains(spotifyURL, "album") {
 		// Playlist/Album
-		tracks = extractSpotifyPlaylist(spotifyURL)
+		var err error
+		tracks, err = extractSpotifyPlaylist(ctx, spotifyURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract playlist: %w", err)
+		}
 	}
 
 	var songs []Song
@@ -44,11 +54,8 @@ func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []
 	}
 
 	// Concurrent search using errgroup with context
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(5) // Limit concurrency to 5
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(MaxConcurrentSearches)
 
 	tempSongs := make([]Song, len(tracks))
 	var mu sync.Mutex
@@ -59,21 +66,21 @@ func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []
 		g.Go(func() error {
 			// Check if context was cancelled
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-gctx.Done():
+				return gctx.Err()
 			default:
 			}
 
-			song := SearchYouTube(query, requester)
-			if song.Title != "" && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
+			song, err := SearchYouTubeWithContext(gctx, query, requester)
+			if err == nil && !song.IsEmpty() && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
 				mu.Lock()
 				tempSongs[idx] = song
 				mu.Unlock()
 				if songChan != nil {
 					select {
 					case songChan <- song:
-					case <-ctx.Done():
-						return ctx.Err()
+					case <-gctx.Done():
+						return gctx.Err()
 					}
 				}
 			}
@@ -83,56 +90,76 @@ func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []
 
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil && err != context.Canceled {
+		return nil, fmt.Errorf("playlist fetch failed: %w", err)
 	}
 
 	for _, s := range tempSongs {
-		if s.Title != "" {
+		if !s.IsEmpty() {
 			songs = append(songs, s)
 		}
 	}
 
-	return songs
+	if len(songs) == 0 {
+		return nil, ErrPlaylistEmpty
+	}
+
+	return songs, nil
 }
 
-func extractSpotifyTrackName(url string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func extractSpotifyTrackName(ctx context.Context, url string) (string, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: request timed out: %v", ErrTimeout, ctx.Err())
+		}
+		return "", fmt.Errorf("failed to fetch URL: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	html := string(body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
 
+	html := string(body)
 	titleRegex := regexp.MustCompile(`<title>(.*?)</title>`)
 	matches := titleRegex.FindStringSubmatch(html)
 	if len(matches) > 1 {
 		title := strings.ReplaceAll(matches[1], " | Spotify", "")
 		title = strings.ReplaceAll(title, " | ", " ")
-		return title
+		return title, nil
 	}
 
-	return ""
+	return "", ErrSongNotFound
 }
 
-func extractSpotifyPlaylist(url string) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+func extractSpotifyPlaylist(ctx context.Context, url string) ([]string, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+	}
 
 	// Use curl.exe to fetch the page
 	cmd := exec.CommandContext(ctx, "curl.exe", "-L", "-s", url)
 	output, err := cmd.Output()
 	if err != nil {
-		return []string{}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: playlist extraction timed out: %v", ErrTimeout, ctx.Err())
+		}
+		return nil, fmt.Errorf("%w: curl failed for Spotify URL %s: %v", ErrFetchFailed, url, err)
 	}
 
 	html := string(output)
@@ -150,5 +177,9 @@ func extractSpotifyPlaylist(url string) []string {
 		}
 	}
 
-	return tracks
+	if len(tracks) == 0 {
+		return nil, ErrPlaylistEmpty
+	}
+
+	return tracks, nil
 }

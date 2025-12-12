@@ -115,23 +115,8 @@ func formatToolResponseWithEmbeds(toolName string, result *tools.ToolResult) (st
 	case tools.ToolWebSearch:
 		if searchData, ok := result.Data.(map[string]interface{}); ok {
 			if resultsRaw, ok := searchData["results"]; ok {
-				// Handle the new search results format - create embeds!
+				// Handle the new search results format - create a single embed with all results!
 				if results, ok := resultsRaw.([]tools.SearchResult); ok && len(results) > 0 {
-					var embeds []Embed
-					
-					for i, r := range results {
-						if i >= 5 {
-							break
-						}
-						embed := Embed{
-							Title:       r.Title,
-							URL:         r.URL,
-							Description: r.Snippet,
-							Color:       0x5865F2, // Discord blurple
-						}
-						embeds = append(embeds, embed)
-					}
-					
 					// Use original question for more natural response, fallback to optimized query
 					displayText := ""
 					if origQ, ok := searchData["original_question"].(string); ok && origQ != "" {
@@ -140,7 +125,38 @@ func formatToolResponseWithEmbeds(toolName string, result *tools.ToolResult) (st
 						displayText = fmt.Sprintf("%v", q)
 					}
 					
-					return fmt.Sprintf("Here's what I found for \"%s\":", displayText), embeds
+					// Create a single embed with all results as fields
+					var fields []EmbedField
+					for i, r := range results {
+						if i >= 5 {
+							break
+						}
+						// Format each result: snippet + URL
+						value := r.Snippet
+						if r.URL != "" {
+							// Discord will auto-link plain URLs in field values
+							value += fmt.Sprintf("\n%s", r.URL)
+						}
+						// Truncate value if too long (Discord limit is 1024 chars per field value)
+						if len(value) > 1000 {
+							value = value[:997] + "..."
+						}
+						
+						field := EmbedField{
+							Name:   r.Title,
+							Value:  value,
+							Inline: false,
+						}
+						fields = append(fields, field)
+					}
+					
+					embed := Embed{
+						Title:  fmt.Sprintf("Search Results for \"%s\"", displayText),
+						Color:  0x5865F2, // Discord blurple
+						Fields: fields,
+					}
+					
+					return fmt.Sprintf("Here's what I found for \"%s\":", displayText), []Embed{embed}
 				}
 			}
 			

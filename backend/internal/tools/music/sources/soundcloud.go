@@ -14,10 +14,13 @@ import (
 )
 
 // FetchSoundCloudPlaylist fetches songs from a SoundCloud playlist/track and converts to YouTube
-func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- Song) []Song {
+func FetchSoundCloudPlaylist(ctx context.Context, soundcloudURL, requester string, songChan chan<- Song) ([]Song, error) {
 	// Extract tracks using yt-dlp
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), PlaylistFetchTimeout*time.Second)
+		defer cancel()
+	}
 
 	cmd := exec.CommandContext(ctx, YtdlpExecutable,
 		"--dump-json",
@@ -28,7 +31,10 @@ func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- So
 
 	output, err := cmd.Output()
 	if err != nil {
-		return []Song{}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: playlist fetch timed out: %v", ErrTimeout, ctx.Err())
+		}
+		return nil, fmt.Errorf("%w: yt-dlp failed for SoundCloud URL %s: %v", ErrFetchFailed, soundcloudURL, err)
 	}
 
 	var tracks []string
@@ -78,8 +84,8 @@ func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- So
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			song := SearchYouTube(query, requester) // SearchYouTube is in youtube.go
-			if song.Title != "" && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
+			song, err := SearchYouTubeWithContext(ctx, query, requester) // SearchYouTubeWithContext is in youtube.go
+			if err == nil && !song.IsEmpty() && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
 				resultsChan <- result{song: song, idx: idx}
 				if songChan != nil {
 					songChan <- song
@@ -99,39 +105,52 @@ func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- So
 	}
 
 	for _, s := range tempSongs {
-		if s.Title != "" {
+		if !s.IsEmpty() {
 			songs = append(songs, s)
 		}
 	}
 
-	return songs
+	if len(songs) == 0 {
+		return nil, ErrPlaylistEmpty
+	}
+
+	return songs, nil
 }
 
-func extractSoundCloudTrackName(url string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func extractSoundCloudTrackName(ctx context.Context, url string) (string, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%w: request timed out: %v", ErrTimeout, ctx.Err())
+		}
+		return "", fmt.Errorf("failed to fetch URL: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	html := string(body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
 
+	html := string(body)
 	titleRegex := regexp.MustCompile(`<title>(.*?)</title>`)
 	matches := titleRegex.FindStringSubmatch(html)
 	if len(matches) > 1 {
 		title := strings.ReplaceAll(matches[1], " | SoundCloud", "")
-		return title
+		return title, nil
 	}
 
-	return ""
+	return "", ErrSongNotFound
 }

@@ -78,6 +78,17 @@ func getStringSliceFromRecord(record *neo4j.Record, key string) []string {
 	return []string{}
 }
 
+func getBoolFromRecord(record *neo4j.Record, key string) bool {
+	val, ok := record.Get(key)
+	if !ok || val == nil {
+		return false
+	}
+	if b, ok := val.(bool); ok {
+		return b
+	}
+	return false
+}
+
 func getStringFromMap(m map[string]interface{}, key, defaultValue string) string {
 	val, ok := m[key]
 	if !ok || val == nil {

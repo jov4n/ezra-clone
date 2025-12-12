@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -26,6 +25,7 @@ type Config struct {
 
 	// Discord
 	DiscordBotToken string
+	MimicChannelID  string // Channel ID for mimic mode auto-posts
 
 	// RunPod
 	RunPodAPIKey     string
@@ -49,6 +49,7 @@ func Load() (*Config, error) {
 		ModelID:         getEnv("MODEL_ID", "openrouter/anthropic/claude-3.5-sonnet"),
 		OpenRouterAPIKey: getEnv("OPENROUTER_API_KEY", ""),
 		DiscordBotToken:  getEnv("DISCORD_BOT_TOKEN", ""),
+		MimicChannelID:   getEnv("MIMIC_CHANNEL_ID", "549646869744058378"),
 		RunPodAPIKey:     getEnv("RUNPOD_API_KEY", ""),
 		RunPodEndpointID: getEnv("RUNPOD_ENDPOINT_ID", ""),
 		ComfyUIWorkflowDir: getEnv("COMFYUI_WORKFLOW_DIR", ""),
@@ -100,19 +101,4 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-func getEnvAsInt(key string, defaultValue int) int {
-	valueStr := getEnv(key, "")
-	if value, err := strconv.Atoi(valueStr); err == nil {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvAsBool(key string, defaultValue bool) bool {
-	valueStr := getEnv(key, "")
-	if value, err := strconv.ParseBool(valueStr); err == nil {
-		return value
-	}
-	return defaultValue
-}
 

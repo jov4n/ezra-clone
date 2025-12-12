@@ -235,15 +235,34 @@ func (m *MusicExecutor) handlePlay(ctx context.Context, execCtx *ExecutionContex
 
 	// Fetch song based on query/URL
 	var song music.Song
+	var err error
 	if music.IsYouTubeURL(query) {
 		song = music.FetchYouTubeVideo(query, execCtx.UserID)
+		if song.Title == "" {
+			return &ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("Could not fetch YouTube video: %s", query),
+			}
+		}
 	} else if music.IsSpotifyURL(query) {
-		songs := music.FetchSpotifyPlaylist(query, execCtx.UserID, nil)
+		songs, fetchErr := music.FetchSpotifyPlaylist(ctx, query, execCtx.UserID, nil)
+		if fetchErr != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("Could not fetch Spotify playlist: %v", fetchErr),
+			}
+		}
 		if len(songs) > 0 {
 			song = songs[0]
 		}
 	} else if music.IsSoundCloudURL(query) {
-		songs := music.FetchSoundCloudPlaylist(query, execCtx.UserID, nil)
+		songs, fetchErr := music.FetchSoundCloudPlaylist(ctx, query, execCtx.UserID, nil)
+		if fetchErr != nil {
+			return &ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("Could not fetch SoundCloud playlist: %v", fetchErr),
+			}
+		}
 		if len(songs) > 0 {
 			song = songs[0]
 		}
@@ -258,6 +277,7 @@ func (m *MusicExecutor) handlePlay(ctx context.Context, execCtx *ExecutionContex
 			Error:   fmt.Sprintf("Could not find song: %s", query),
 		}
 	}
+	_ = err // Suppress unused variable warning
 
 	// Add to queue
 	bot.Playlist.Lock()

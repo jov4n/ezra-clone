@@ -37,13 +37,14 @@ type MimicState struct {
 
 // Executor handles tool execution
 type Executor struct {
-	repo            *graph.Repository
-	httpClient      *http.Client
-	logger          *zap.Logger
-	discordExecutor *DiscordExecutor
-	comfyExecutor   *ComfyExecutor
-	musicExecutor   *MusicExecutor
-	mimicStates     map[string]*MimicState // key: agentID
+	repo                *graph.Repository
+	httpClient          *http.Client
+	logger              *zap.Logger
+	discordExecutor     *DiscordExecutor
+	comfyExecutor       *ComfyExecutor
+	musicExecutor       *MusicExecutor
+	mimicStates         map[string]*MimicState // key: agentID
+	mimicBackgroundTask *MimicBackgroundTask
 }
 
 // NewExecutor creates a new tool executor
@@ -71,6 +72,11 @@ func (e *Executor) SetComfyExecutor(ce *ComfyExecutor) {
 // SetMusicExecutor sets the music executor for music playback tools
 func (e *Executor) SetMusicExecutor(me *MusicExecutor) {
 	e.musicExecutor = me
+}
+
+// SetMimicBackgroundTask sets the background task manager for mimic mode
+func (e *Executor) SetMimicBackgroundTask(task *MimicBackgroundTask) {
+	e.mimicBackgroundTask = task
 }
 
 // GetMimicState returns the current mimic state for an agent
@@ -157,6 +163,8 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 		return e.executeDiscordGetUserInfo(ctx, toolCall.Arguments)
 	case ToolDiscordGetChannelInfo:
 		return e.executeDiscordGetChannelInfo(ctx, execCtx, toolCall.Arguments)
+	case ToolReadCodebase:
+		return e.executeReadCodebase(ctx, execCtx, toolCall.Arguments)
 
 	// Personality/Mimic Tools
 	case ToolMimicPersonality:

@@ -36,7 +36,7 @@ func GeneratePlaylistQueries(query string) []string {
 	requestBody := map[string]interface{}{
 		"model":       model,
 		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
-		"max_tokens":  600,
+		"max_tokens":  DefaultOpenRouterPlaylistMaxTokens,
 		"temperature": 0.8,
 	}
 
@@ -124,7 +124,7 @@ func GenerateRadioSuggestions(seed string, recentSongs []string) []string {
 	requestBody := map[string]interface{}{
 		"model":       model,
 		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
-		"max_tokens":  500,
+		"max_tokens":  DefaultOpenRouterMaxTokens,
 		"temperature": 0.9, // Slightly higher temperature for more variety
 	}
 

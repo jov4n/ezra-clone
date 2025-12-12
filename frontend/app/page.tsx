@@ -17,6 +17,7 @@ function HomeContent() {
   const searchParams = useSearchParams();
   const [agentID, setAgentID] = useState(searchParams?.get('agent') || DEFAULT_AGENT_ID);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
@@ -33,6 +34,7 @@ function HomeContent() {
   }, [searchParams]);
 
   const loadAgents = async () => {
+    setAgentsLoading(true);
     try {
       const agentList = await listAgents();
       setAgents(agentList);
@@ -43,6 +45,8 @@ function HomeContent() {
       }
     } catch (error) {
       console.error('Failed to load agents:', error);
+    } finally {
+      setAgentsLoading(false);
     }
   };
 
@@ -76,7 +80,9 @@ function HomeContent() {
             <h1 className="text-lg font-semibold text-white">
               Ezra Clone / {agentID}
             </h1>
-            {agents.length > 0 && (
+            {agentsLoading ? (
+              <div className="px-3 py-1.5 text-gray-400 text-sm">Loading agents...</div>
+            ) : agents.length > 0 ? (
               <select
                 value={agentID}
                 onChange={(e) => {
@@ -91,7 +97,7 @@ function HomeContent() {
                   </option>
                 ))}
               </select>
-            )}
+            ) : null}
           </div>
           <div className="flex items-center space-x-2 lg:space-x-4">
             <button

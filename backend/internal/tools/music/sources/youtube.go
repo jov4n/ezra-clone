@@ -13,6 +13,47 @@ import (
 
 var YtdlpExecutable = "yt-dlp"
 
+// YouTubeSource implements the AudioSource interface for YouTube
+type YouTubeSource struct{}
+
+// NewYouTubeSource creates a new YouTube audio source
+func NewYouTubeSource() *YouTubeSource {
+	return &YouTubeSource{}
+}
+
+// Name returns the source name
+func (y *YouTubeSource) Name() string {
+	return "youtube"
+}
+
+// SupportsURL returns true if the URL is a YouTube URL
+func (y *YouTubeSource) SupportsURL(url string) bool {
+	return strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
+}
+
+// Search searches for a song on YouTube
+func (y *YouTubeSource) Search(ctx context.Context, query, requester string) (Song, error) {
+	return SearchYouTubeWithContext(ctx, query, requester)
+}
+
+// FetchByURL fetches song metadata from a YouTube URL
+func (y *YouTubeSource) FetchByURL(ctx context.Context, url, requester string) (Song, error) {
+	return FetchYouTubeVideoWithContext(ctx, url, requester)
+}
+
+// FetchPlaylist fetches songs from a YouTube playlist (not implemented yet)
+func (y *YouTubeSource) FetchPlaylist(ctx context.Context, url, requester string, songChan chan<- Song) ([]Song, error) {
+	// For now, just fetch a single video
+	song, err := y.FetchByURL(ctx, url, requester)
+	if err != nil {
+		return nil, err
+	}
+	if songChan != nil {
+		songChan <- song
+	}
+	return []Song{song}, nil
+}
+
 // FormatDuration formats a duration from seconds to MM:SS or H:MM:SS
 func FormatDuration(d interface{}) string {
 	var seconds float64
@@ -77,18 +118,27 @@ func init() {
 	}
 }
 
-// FetchYouTubeVideo gets video info from a YouTube URL
-func FetchYouTubeVideo(url, requester string) Song {
-	cmd := exec.Command(YtdlpExecutable, "--dump-json", "--no-playlist", url)
+// FetchYouTubeVideoWithContext gets video info from a YouTube URL with context support
+func FetchYouTubeVideoWithContext(ctx context.Context, url, requester string) (Song, error) {
+	cmd := exec.CommandContext(ctx, YtdlpExecutable, "--dump-json", "--no-playlist", url)
 	output, err := cmd.Output()
 	if err != nil {
-		return Song{}
+		if ctx.Err() != nil {
+			return Song{}, fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
+		}
+		return Song{}, fmt.Errorf("%w: yt-dlp failed for URL %s: %v", ErrFetchFailed, url, err)
 	}
 
 	var videoInfo map[string]interface{}
-	json.Unmarshal(output, &videoInfo)
+	if err := json.Unmarshal(output, &videoInfo); err != nil {
+		return Song{}, fmt.Errorf("%w: failed to parse video info: %v", ErrFetchFailed, err)
+	}
 
 	title, _ := videoInfo["title"].(string)
+	if title == "" {
+		return Song{}, ErrSongNotFound
+	}
+
 	duration := FormatDuration(videoInfo["duration"])
 	thumbnail := ""
 	if thumbnails, ok := videoInfo["thumbnail"].(string); ok {
@@ -102,39 +152,55 @@ func FetchYouTubeVideo(url, requester string) Song {
 		Thumbnail: thumbnail,
 		Requester: requester,
 		Source:    "youtube",
-	}
+	}, nil
 }
 
-// SearchYouTube searches for a single song on YouTube
-func SearchYouTube(query, requester string) Song {
+// FetchYouTubeVideo gets video info from a YouTube URL (legacy wrapper for backward compatibility)
+// Deprecated: Use FetchYouTubeVideoWithContext instead
+func FetchYouTubeVideo(url, requester string) Song {
+	song, err := FetchYouTubeVideoWithContext(context.Background(), url, requester)
+	if err != nil {
+		return Song{}
+	}
+	return song
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// SearchYouTubeWithContext searches for a single song on YouTube with context support
+func SearchYouTubeWithContext(ctx context.Context, query, requester string) (Song, error) {
+	// Use provided context or create one with timeout
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultSearchTimeout*time.Second)
+		defer cancel()
+	}
 
 	cmd := exec.CommandContext(ctx, YtdlpExecutable, "--dump-json", "--default-search", "ytsearch1", query)
 	output, err := cmd.Output()
 	if err != nil {
-		return Song{}
+		if ctx.Err() != nil {
+			return Song{}, fmt.Errorf("%w: search timed out for query %q", ErrTimeout, query)
+		}
+		return Song{}, fmt.Errorf("%w: yt-dlp search failed for query %q: %v", ErrFetchFailed, query, err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) == 0 || lines[0] == "" {
-		return Song{}
+		return Song{}, fmt.Errorf("%w: no results for query %q", ErrSongNotFound, query)
 	}
 
 	var videoInfo map[string]interface{}
 	if err := json.Unmarshal([]byte(lines[0]), &videoInfo); err != nil {
-		return Song{}
+		return Song{}, fmt.Errorf("%w: failed to parse search results: %v", ErrFetchFailed, err)
 	}
 
 	title, _ := videoInfo["title"].(string)
 	if title == "" {
-		return Song{}
+		return Song{}, fmt.Errorf("%w: no valid result for query %q", ErrSongNotFound, query)
 	}
 
 	videoID, ok := videoInfo["id"].(string)
 	if !ok {
-		return Song{}
+		return Song{}, fmt.Errorf("%w: no video ID found for query %q", ErrSongNotFound, query)
 	}
 	videoURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
 	duration := FormatDuration(videoInfo["duration"])
@@ -150,5 +216,15 @@ func SearchYouTube(query, requester string) Song {
 		Thumbnail: thumbnail,
 		Requester: requester,
 		Source:    "youtube",
+	}, nil
+}
+
+// SearchYouTube searches for a single song on YouTube (legacy wrapper for backward compatibility)
+// Deprecated: Use SearchYouTubeWithContext instead
+func SearchYouTube(query, requester string) Song {
+	song, err := SearchYouTubeWithContext(context.Background(), query, requester)
+	if err != nil {
+		return Song{}
 	}
+	return song
 }

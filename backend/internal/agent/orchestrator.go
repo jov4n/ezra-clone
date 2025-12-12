@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,13 +10,16 @@ import (
 	"ezra-clone/backend/internal/constants"
 	"ezra-clone/backend/internal/graph"
 	"ezra-clone/backend/internal/tools"
+	apperrors "ezra-clone/backend/pkg/errors"
 	"ezra-clone/backend/pkg/logger"
 	"go.uber.org/zap"
 )
 
 var (
-	ErrIgnored      = errors.New("turn was ignored by agent")
-	ErrMaxRecursion = errors.New("maximum recursion depth reached")
+	// ErrIgnored is returned when the agent chooses to ignore a message
+	ErrIgnored = apperrors.ErrAgentIgnored
+	// ErrMaxRecursion is returned when maximum recursion depth is reached
+	ErrMaxRecursion = apperrors.NewBaseError(apperrors.ErrorTypeAgent, "maximum recursion depth reached", nil)
 )
 
 // Orchestrator manages the agent's reasoning and action loop
@@ -53,6 +55,16 @@ func (o *Orchestrator) SetComfyExecutor(ce *tools.ComfyExecutor) {
 // SetMusicExecutor sets the music executor for music playback tools
 func (o *Orchestrator) SetMusicExecutor(me *tools.MusicExecutor) {
 	o.toolExecutor.SetMusicExecutor(me)
+}
+
+// SetMimicBackgroundTask sets the background task manager for mimic mode
+func (o *Orchestrator) SetMimicBackgroundTask(task *tools.MimicBackgroundTask) {
+	o.toolExecutor.SetMimicBackgroundTask(task)
+}
+
+// GetToolExecutor returns the tool executor (for background tasks)
+func (o *Orchestrator) GetToolExecutor() *tools.Executor {
+	return o.toolExecutor
 }
 
 // TurnResult represents the result of a single agent turn
@@ -154,8 +166,31 @@ func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *t
 		return nil, fmt.Errorf("failed to build system prompt: %w", err)
 	}
 
-	// 6. Get all tools
+	// 6. Get all tools, but filter out mimic_personality if already mimicking
 	allTools := tools.GetAllTools()
+	
+	// If already mimicking, remove mimic_personality tool unless user explicitly wants to mimic someone
+	if o.toolExecutor.IsMimicking(execCtx.AgentID) {
+		// Check if user explicitly mentions wanting to mimic someone (different user or update)
+		messageLower := strings.ToLower(message)
+		shouldAllowMimicTool := strings.Contains(messageLower, "mimic") || 
+		                        strings.Contains(messageLower, "update personality") ||
+		                        strings.Contains(messageLower, "refresh personality")
+		
+		if !shouldAllowMimicTool {
+			// Filter out mimic_personality tool
+			filteredTools := make([]adapter.Tool, 0, len(allTools))
+			for _, tool := range allTools {
+				if tool.Function.Name != tools.ToolMimicPersonality {
+					filteredTools = append(filteredTools, tool)
+				}
+			}
+			allTools = filteredTools
+			o.logger.Debug("Filtered out mimic_personality tool - already in mimic mode",
+				zap.String("agent_id", execCtx.AgentID),
+			)
+		}
+	}
 
 	// 7. Think - Call LLM
 	llmResponse, err := o.llm.Generate(ctx, systemPrompt, message, allTools)

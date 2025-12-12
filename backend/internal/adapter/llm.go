@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,10 +138,21 @@ func (a *LLMAdapter) Generate(ctx context.Context, systemPrompt, userMsg string,
 			break
 		}
 
+		// Log detailed error information
+		errMsg := err.Error()
 		a.logger.Error("LLM request failed",
 			zap.Error(err),
 			zap.Int("attempt", attempt+1),
+			zap.String("model", currentModel),
+			zap.String("error_message", errMsg),
 		)
+
+		// Check if it's a JSON parsing error (likely server returned non-JSON error)
+		if strings.Contains(errMsg, "invalid character") || strings.Contains(errMsg, "json") {
+			a.logger.Warn("LLM service returned non-JSON error response - this may be a transient server issue",
+				zap.String("error", errMsg),
+			)
+		}
 	}
 
 	if err != nil {

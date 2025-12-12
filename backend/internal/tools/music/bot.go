@@ -7,6 +7,15 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// Constants for music bot configuration
+const (
+	// MaxRadioHistorySize is the maximum number of songs to keep in radio history
+	MaxRadioHistorySize = 100
+
+	// DefaultMaxQueueSize is the default maximum size for the music queue
+	DefaultMaxQueueSize = 500
+)
+
 // Song represents a track in the queue
 type Song struct {
 	Title     string
@@ -127,8 +136,8 @@ func (b *MusicBot) AddToRadioHistory(url string) {
 	b.RadioMu.Lock()
 	defer b.RadioMu.Unlock()
 	b.RadioHistoryMap[url] = struct{}{}
-	// Keep history limited to prevent memory growth (max 100 songs)
-	if len(b.RadioHistoryMap) > 100 {
+	// Keep history limited to prevent memory growth
+	if len(b.RadioHistoryMap) > MaxRadioHistorySize {
 		// Remove a random entry (maps don't guarantee order, so just delete first found)
 		for k := range b.RadioHistoryMap {
 			delete(b.RadioHistoryMap, k)

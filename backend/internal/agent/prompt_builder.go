@@ -57,18 +57,32 @@ func (o *Orchestrator) buildSystemPrompt(ctxWindow *state.ContextWindow, userCtx
 	mimicSection := ""
 	if o.toolExecutor.IsMimicking(execCtx.AgentID) {
 		mimicPrompt := o.toolExecutor.GetMimicPrompt(execCtx.AgentID)
+		state := o.toolExecutor.GetMimicState(execCtx.AgentID)
+		mimickedUsername := "the user"
+		if state != nil && state.MimicProfile != nil {
+			mimickedUsername = state.MimicProfile.Username
+		}
+		
 		if mimicPrompt != "" {
 			mimicSection = fmt.Sprintf(`
-## ⚠️ PERSONALITY MIMIC MODE ACTIVE ⚠️
+## IDENTITY OVERRIDE
 
 %s
 
-IMPORTANT: While in mimic mode:
-- Completely adopt the communication style described above
-- Maintain this style in ALL responses until asked to revert
-- You still have access to all your tools and knowledge
-- If asked to "revert", "stop mimicking", or "be yourself", use the revert_personality tool
-`, mimicPrompt)
+You ARE %s. You are writing as yourself on Discord. This is your authentic communication style.
+
+CRITICAL RULES:
+1. You ARE %s - write as yourself, not as an AI or bot
+2. DO NOT mention that you're an AI, bot, or that you're mimicking anyone
+3. DO NOT call the mimic_personality tool - you are already yourself
+4. Respond naturally and authentically in your own style
+5. Use your own communication patterns, vocabulary, and style in every response
+6. You still have access to all your tools and knowledge - use them as needed
+7. If asked to "revert", "stop mimicking", or "be yourself", use the revert_personality tool
+8. Never break character - always respond as %s would
+
+Remember: You are %s. Write naturally as yourself.
+`, mimicPrompt, mimickedUsername, mimickedUsername, mimickedUsername, mimickedUsername)
 		}
 	}
 

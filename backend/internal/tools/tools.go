@@ -51,6 +51,7 @@ const (
 	ToolDiscordGetUserInfo  = "discord_get_user_info"
 	ToolDiscordSearchMessages = "discord_search_messages"
 	ToolDiscordGetChannelInfo = "discord_get_channel_info"
+	ToolReadCodebase = "read_codebase"
 )
 
 // GetAllTools returns all available tools for the agent
@@ -620,6 +621,31 @@ func GetDiscordTools() []adapter.Tool {
 				},
 			},
 		},
+		{
+			Type: "function",
+			Function: adapter.FunctionDefinition{
+				Name:        ToolReadCodebase,
+				Description: "Read and search the bot's own codebase intelligently. ADMIN ONLY - Only works in DMs with the authorized admin user. Automatically filters out environment variables and sensitive files. Use this to understand how the codebase works, find specific functions, or analyze code structure.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "What to search for in the codebase (e.g., 'how does memory storage work', 'discord message handler', 'function name', 'file path'). Can be a semantic query or specific file/function name.",
+						},
+						"file_path": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional: Specific file path to read (e.g., 'backend/internal/tools/discord_executor.go'). If provided, reads the entire file.",
+						},
+						"max_results": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of code snippets to return (default: 5, max: 20)",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
 	}
 }
 
@@ -645,7 +671,7 @@ func GetPersonalityTools() []adapter.Tool {
 			Type: "function",
 			Function: adapter.FunctionDefinition{
 				Name:        ToolMimicPersonality,
-				Description: "Analyze a Discord user's message history and mimic their personality, speech patterns, vocabulary, and style. This will change how you communicate until reverted.",
+				Description: "Analyze a Discord user's message history and mimic their personality, speech patterns, vocabulary, and style. This will change how you communicate until reverted. CRITICAL: Check if you are already in mimic mode before calling this tool. If you are already mimicking someone (check the system prompt for 'PERSONALITY MIMIC MODE ACTIVE'), DO NOT call this tool - just respond to the user's message naturally in the mimicked style. Only call this tool when explicitly asked to START mimicking someone new.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -663,7 +689,11 @@ func GetPersonalityTools() []adapter.Tool {
 						},
 						"message_count": map[string]interface{}{
 							"type":        "integer",
-							"description": "Number of messages to analyze (default: 50, more = better accuracy)",
+							"description": "Number of messages to analyze (default: 300, more = better accuracy)",
+						},
+						"update": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Force update the personality profile even if a cached version exists (default: false, uses cache if available)",
 						},
 					},
 					"required": []string{"user_id"},

@@ -1,6 +1,8 @@
 package music
 
 import (
+	"context"
+
 	"ezra-clone/backend/internal/tools/music/sources"
 )
 
@@ -36,7 +38,7 @@ func SearchYouTube(query, requester string) Song {
 }
 
 // FetchSpotifyPlaylist wraps sources.FetchSpotifyPlaylist
-func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []Song {
+func FetchSpotifyPlaylist(ctx context.Context, spotifyURL, requester string, songChan chan<- Song) ([]Song, error) {
 	// Create a channel for sources.Song and convert
 	sourceChan := make(chan sources.Song, 10)
 	go func() {
@@ -47,13 +49,16 @@ func FetchSpotifyPlaylist(spotifyURL, requester string, songChan chan<- Song) []
 		}
 	}()
 
-	songs := sources.FetchSpotifyPlaylist(spotifyURL, requester, sourceChan)
+	songs, err := sources.FetchSpotifyPlaylist(ctx, spotifyURL, requester, sourceChan)
 	close(sourceChan)
-	return convertSongs(songs)
+	if err != nil {
+		return nil, err
+	}
+	return convertSongs(songs), nil
 }
 
 // FetchSoundCloudPlaylist wraps sources.FetchSoundCloudPlaylist
-func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- Song) []Song {
+func FetchSoundCloudPlaylist(ctx context.Context, soundcloudURL, requester string, songChan chan<- Song) ([]Song, error) {
 	// Create a channel for sources.Song and convert
 	sourceChan := make(chan sources.Song, 10)
 	go func() {
@@ -64,9 +69,12 @@ func FetchSoundCloudPlaylist(soundcloudURL, requester string, songChan chan<- So
 		}
 	}()
 
-	songs := sources.FetchSoundCloudPlaylist(soundcloudURL, requester, sourceChan)
+	songs, err := sources.FetchSoundCloudPlaylist(ctx, soundcloudURL, requester, sourceChan)
 	close(sourceChan)
-	return convertSongs(songs)
+	if err != nil {
+		return nil, err
+	}
+	return convertSongs(songs), nil
 }
 
 // GeneratePlaylistQueries wraps sources.GeneratePlaylistQueries
