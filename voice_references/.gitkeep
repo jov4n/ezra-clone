@@ -1,0 +1,4 @@
+# Place default voice reference audio files here
+# Supported formats: WAV, MP3, OGG, M4A, FLAC, AAC
+# Files will be automatically converted to WAV 24kHz mono for VibeVoice
+

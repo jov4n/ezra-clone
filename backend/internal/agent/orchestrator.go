@@ -57,6 +57,11 @@ func (o *Orchestrator) SetMusicExecutor(me *tools.MusicExecutor) {
 	o.toolExecutor.SetMusicExecutor(me)
 }
 
+// SetVoiceExecutor sets the voice executor for voice interaction tools
+func (o *Orchestrator) SetVoiceExecutor(ve *tools.VoiceExecutor) {
+	o.toolExecutor.SetVoiceExecutor(ve)
+}
+
 // SetMimicBackgroundTask sets the background task manager for mimic mode
 func (o *Orchestrator) SetMimicBackgroundTask(task *tools.MimicBackgroundTask) {
 	o.toolExecutor.SetMimicBackgroundTask(task)

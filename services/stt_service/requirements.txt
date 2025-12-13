@@ -1,0 +1,8 @@
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+faster-whisper>=1.0.3
+numpy>=1.24.0
+python-multipart>=0.0.6
+# Note: torch, torchvision, torchaudio should be installed with CUDA support:
+# uv pip install --python .venv/Scripts/python.exe torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+

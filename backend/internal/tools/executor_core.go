@@ -43,6 +43,7 @@ type Executor struct {
 	discordExecutor     *DiscordExecutor
 	comfyExecutor       *ComfyExecutor
 	musicExecutor       *MusicExecutor
+	voiceExecutor       *VoiceExecutor
 	mimicStates         map[string]*MimicState // key: agentID
 	mimicBackgroundTask *MimicBackgroundTask
 }
@@ -77,6 +78,29 @@ func (e *Executor) SetMusicExecutor(me *MusicExecutor) {
 // SetMimicBackgroundTask sets the background task manager for mimic mode
 func (e *Executor) SetMimicBackgroundTask(task *MimicBackgroundTask) {
 	e.mimicBackgroundTask = task
+}
+
+// SetVoiceExecutor sets the voice executor for voice interaction tools
+func (e *Executor) SetVoiceExecutor(ve *VoiceExecutor) {
+	e.voiceExecutor = ve
+}
+
+// executeVoiceTool executes a voice-related tool
+func (e *Executor) executeVoiceTool(ctx context.Context, execCtx *ExecutionContext, toolCall adapter.ToolCall) *ToolResult {
+	if e.voiceExecutor == nil {
+		return &ToolResult{
+			Success: false,
+			Error:   "Voice executor not initialized",
+		}
+	}
+
+	// Parse arguments
+	args := make(map[string]interface{})
+	if toolCall.Arguments != nil {
+		args = toolCall.Arguments
+	}
+
+	return e.voiceExecutor.ExecuteVoiceTool(ctx, execCtx, toolCall.Name, args)
 }
 
 // GetMimicState returns the current mimic state for an agent
@@ -188,6 +212,10 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 	case ToolMusicPlay, ToolMusicPlaylist, ToolMusicQueue, ToolMusicSkip,
 		ToolMusicPause, ToolMusicResume, ToolMusicStop, ToolMusicVolume, ToolMusicRadio:
 		return e.executeMusicTool(ctx, execCtx, toolCall)
+
+	// Voice Tools
+	case ToolVoiceJoinChannel, ToolVoiceLeaveChannel, ToolVoiceSetReference, ToolVoiceStatus:
+		return e.executeVoiceTool(ctx, execCtx, toolCall)
 
 	default:
 		e.logger.Warn("Unknown tool", zap.String("tool", toolCall.Name))

@@ -59,6 +59,15 @@ docker-compose.override.yml
 # Neo4j data
 neo4j-data/
 
+# Python virtual environments
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
 # Logs
 *.log
 logs/

@@ -1,0 +1,9 @@
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+numpy>=1.24.0
+soundfile>=0.12.0
+coqui-tts>=0.27.0
+# Note: torch, torchvision, torchaudio should be installed with CUDA support:
+# uv pip install --python .venv/Scripts/python.exe torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+

@@ -88,7 +88,88 @@ func GetAllTools() []adapter.Tool {
 	// Music Tools
 	tools = append(tools, GetMusicTools()...)
 	
+	// Voice Tools
+	tools = append(tools, GetVoiceTools()...)
+	
 	return tools
+}
+
+// GetVoiceTools returns voice interaction tools
+func GetVoiceTools() []adapter.Tool {
+	return []adapter.Tool{
+		{
+			Type: "function",
+			Function: adapter.FunctionDefinition{
+				Name:        ToolVoiceJoinChannel,
+				Description: "Join a Discord voice channel and start listening to users. The bot will automatically transcribe speech, process it with the LLM, and respond via voice. If channel_id is not provided, will attempt to join the user's current voice channel.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"channel_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Voice channel ID to join (leave empty to auto-detect user's current voice channel)",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: adapter.FunctionDefinition{
+				Name:        ToolVoiceLeaveChannel,
+				Description: "Leave the current voice channel and stop listening.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"guild_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Guild ID (leave empty to use current guild)",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: adapter.FunctionDefinition{
+				Name:        ToolVoiceSetReference,
+				Description: "Set or update the voice reference audio for zero-shot voice cloning. Can use a Discord attachment URL or a local file path. The audio will be converted to the appropriate format automatically.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"attachment_url": map[string]interface{}{
+							"type":        "string",
+							"description": "URL of a Discord attachment (audio file)",
+						},
+						"file_path": map[string]interface{}{
+							"type":        "string",
+							"description": "Local file path to an audio file",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: adapter.FunctionDefinition{
+				Name:        ToolVoiceStatus,
+				Description: "Get the current voice connection status, including which channels the bot is connected to.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"guild_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Guild ID to check (leave empty to get all connections)",
+						},
+					},
+					"required": []string{},
+				},
+			},
+		},
+	}
 }
 
 // GetMemoryTools returns memory-related tools
@@ -836,6 +917,14 @@ const (
 	ToolMusicStop     = "music_stop"
 	ToolMusicVolume   = "music_volume"
 	ToolMusicRadio    = "music_radio"
+)
+
+// Tool names - Voice Tools
+const (
+	ToolVoiceJoinChannel  = "voice_join_channel"
+	ToolVoiceLeaveChannel = "voice_leave_channel"
+	ToolVoiceSetReference = "voice_set_reference"
+	ToolVoiceStatus       = "voice_status"
 )
 
 // GetMusicTools returns music playback and generation tools

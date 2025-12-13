@@ -32,6 +32,13 @@ type Config struct {
 	RunPodEndpointID string
 	ComfyUIWorkflowDir string
 	ComfyUIOutputDir   string
+
+	// Voice Services
+	STTServiceURL      string // Speech-to-text service URL
+	TTSServiceURL      string // Text-to-speech service URL
+	VoiceReferenceDir  string // Directory for voice reference audio files
+	VADThreshold      float64 // Voice activity detection energy threshold
+	SilenceDuration    int     // Milliseconds of silence before considering speech ended
 }
 
 // Load reads configuration from environment variables
@@ -54,6 +61,11 @@ func Load() (*Config, error) {
 		RunPodEndpointID: getEnv("RUNPOD_ENDPOINT_ID", ""),
 		ComfyUIWorkflowDir: getEnv("COMFYUI_WORKFLOW_DIR", ""),
 		ComfyUIOutputDir:   getEnv("COMFYUI_OUTPUT_DIR", "outputs"),
+		STTServiceURL:      getEnv("STT_SERVICE_URL", "http://localhost:8001"),
+		TTSServiceURL:      getEnv("TTS_SERVICE_URL", "http://localhost:8002"),
+		VoiceReferenceDir:   getEnv("VOICE_REFERENCE_DIR", "voice_references"),
+		VADThreshold:        getEnvFloat("VAD_THRESHOLD", 0.01),
+		SilenceDuration:     getEnvInt("SILENCE_DURATION", 1000),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -97,6 +109,26 @@ func (c *Config) IsProduction() bool {
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		var result float64
+		if _, err := fmt.Sscanf(value, "%f", &result); err == nil {
+			return result
+		}
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		var result int
+		if _, err := fmt.Sscanf(value, "%d", &result); err == nil {
+			return result
+		}
 	}
 	return defaultValue
 }

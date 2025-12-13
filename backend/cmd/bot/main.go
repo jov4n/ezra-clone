@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -13,6 +14,7 @@ import (
 	"ezra-clone/backend/internal/agent"
 	"ezra-clone/backend/internal/discord"
 	"ezra-clone/backend/internal/graph"
+	"ezra-clone/backend/internal/services"
 	"ezra-clone/backend/internal/tools"
 	"ezra-clone/backend/pkg/config"
 	"ezra-clone/backend/pkg/logger"
@@ -85,6 +87,63 @@ func main() {
 	agentOrch.SetMusicExecutor(musicExecutor)
 	log.Info("Music executor initialized")
 
+	// Get base path for service management
+	basePath, err := os.Getwd()
+	if err != nil {
+		log.Warn("Failed to get working directory, services may not start", zap.Error(err))
+		basePath = "."
+	}
+
+	// Initialize service manager to start voice services (bridge, STT, TTS)
+	serviceManager := services.NewServiceManager(log, basePath, cfg.STTServiceURL, cfg.TTSServiceURL)
+	
+	// Start voice bridge service first (required before voice executor)
+	log.Info("Starting voice bridge service...")
+	if err := serviceManager.StartVoiceBridge(); err != nil {
+		log.Warn("Failed to start voice bridge service", zap.Error(err),
+			zap.String("note", "Service may already be running or will be started manually"))
+	} else {
+		// Give the bridge a moment to start
+		time.Sleep(1 * time.Second)
+	}
+	
+	// Start STT and TTS services
+	log.Info("Starting voice services (STT and TTS)...")
+	if err := serviceManager.StartSTTService(); err != nil {
+		log.Warn("Failed to start STT service", zap.Error(err))
+	}
+	if err := serviceManager.StartTTSService(); err != nil {
+		log.Warn("Failed to start TTS service", zap.Error(err))
+	}
+	
+	// Initialize Voice executor (it will wait for bridge if not ready)
+	voiceExecutor, err := tools.NewVoiceExecutor(dg, log, cfg)
+	if err != nil {
+		log.Warn("Voice executor initialization failed", zap.Error(err))
+		log.Info("Voice features will be unavailable")
+	} else {
+		// Set agent orchestrator for LLM processing
+		// Wrap orchestrator to implement tools.AgentOrchestrator interface
+		orchAdapter := &agent.OrchestratorAdapter{Orchestrator: agentOrch}
+		voiceExecutor.SetAgentOrchestrator(orchAdapter)
+		agentOrch.SetVoiceExecutor(voiceExecutor)
+		
+		// Wait a bit for services to fully start, then warm up
+		log.Info("Waiting for services to initialize...")
+		time.Sleep(3 * time.Second)
+		
+		// Warm up STT and TTS services to avoid cold start
+		log.Info("Warming up STT and TTS services...")
+		voiceExecutor.WarmupServices(ctx) // Non-blocking - services will load on first use if not available
+		
+		log.Info("Voice executor initialized",
+			zap.String("stt_service", cfg.STTServiceURL),
+			zap.String("tts_service", cfg.TTSServiceURL),
+			zap.Bool("stt_running", serviceManager.IsSTTRunning()),
+			zap.Bool("tts_running", serviceManager.IsTTSRunning()),
+		)
+	}
+
 	// Initialize Mimic background task
 	mimicTask := tools.NewMimicBackgroundTask(
 		agentOrch.GetToolExecutor(),
@@ -105,6 +164,14 @@ func main() {
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		messageHandler.HandleMessage(s, m)
 	})
+
+	// Add voice state update handler for SSRC tracking
+	if voiceExecutor != nil {
+		dg.AddHandler(func(s *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
+			voiceExecutor.HandleVoiceStateUpdate(s, vs)
+		})
+		// Speaking update handler is added in setupVoiceStateTracking
+	}
 
 	// Set intents (including voice state for music bot)
 	// Required intents:
@@ -136,6 +203,10 @@ func main() {
 	<-sc
 
 	log.Info("Shutting down Discord bot...")
+	
+	// Stop voice services
+	log.Info("Stopping voice services...")
+	serviceManager.StopAll()
 }
 
 

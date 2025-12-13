@@ -11,11 +11,12 @@ require (
 	github.com/sashabaranov/go-openai v1.24.0
 	github.com/stretchr/testify v1.9.0
 	go.uber.org/zap v1.27.0
+	golang.org/x/crypto v0.23.0
 	golang.org/x/sync v0.19.0
 )
 
-// Use Richy-Z's fork with aead_aes256_gcm_rtpsize voice encryption fix (PR #1677)
-replace github.com/bwmarrin/discordgo => github.com/Richy-Z/discordgo v0.29.1-0.20251123191524-2672c0ec4dca
+// Use standard discordgo
+// replace github.com/bwmarrin/discordgo => github.com/Richy-Z/discordgo v0.29.1-0.20251123191524-2672c0ec4dca
 
 require (
 	github.com/bytedance/sonic v1.11.6 // indirect
@@ -42,7 +43,6 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.23.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.20.0 // indirect
 	golang.org/x/text v0.15.0 // indirect
