@@ -5,14 +5,18 @@ import (
 	"io"
 	"os/exec"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // PreloadNextSong preloads the next song for seamless transitions
 func PreloadNextSong(bot *MusicBot, song Song) {
+	bot.logger.Debug("Starting preload", zap.String("title", song.Title), zap.String("url", song.URL))
 	bot.PreloadMu.Lock()
 
 	// Clean up existing preloaded song
 	if bot.Preloaded != nil {
+		bot.logger.Debug("Cleaning up existing preload before starting new one")
 		cleanupPreloadedSong(bot.Preloaded)
 	}
 	bot.Preloaded = nil
@@ -25,15 +29,17 @@ func PreloadNextSong(bot *MusicBot, song Song) {
 	var err error
 
 	if song.Source == "twitch" {
-		ytdlpCmd, audioOut, err = startTwitchStream(ctx, song.URL)
+		ytdlpCmd, audioOut, err = startTwitchStream(ctx, song.URL, bot.logger)
 	} else {
-		ytdlpCmd, audioOut, err = startYouTubeStream(ctx, song.URL)
+		ytdlpCmd, audioOut, err = startYouTubeStream(ctx, song.URL, bot.logger)
 	}
 
 	if err != nil {
+		bot.logger.Warn("Failed to start preload stream", zap.String("title", song.Title), zap.Error(err))
 		cancel()
 		return
 	}
+	bot.logger.Debug("Preload stream started successfully", zap.String("title", song.Title))
 
 	var opusOut io.ReadCloser
 	if song.Source == "twitch" {
@@ -61,9 +67,10 @@ func PreloadNextSong(bot *MusicBot, song Song) {
 	// Store preloaded song atomically
 	bot.PreloadMu.Lock()
 	// Check if another preload started while we were setting up
-	if bot.Preloaded != nil {
-		// Another preload won, clean up ours
-		bot.PreloadMu.Unlock()
+		if bot.Preloaded != nil {
+			// Another preload won, clean up ours
+			bot.logger.Debug("Another preload started while setting up, cleaning up duplicate preload", zap.String("title", song.Title))
+			bot.PreloadMu.Unlock()
 		cancel()
 		if ytdlpCmd.Process != nil {
 			ytdlpCmd.Process.Kill()
@@ -73,6 +80,7 @@ func PreloadNextSong(bot *MusicBot, song Song) {
 	}
 	bot.Preloaded = preloadedSong
 	bot.PreloadMu.Unlock()
+	bot.logger.Debug("Preload registered successfully", zap.String("title", song.Title))
 
 	// Start reading from pipe in background
 	go func() {
@@ -124,7 +132,10 @@ func PreloadNextSong(bot *MusicBot, song Song) {
 				}
 
 				if err != io.EOF {
-					// Non-EOF error during preload, just silently abort
+					// Non-EOF error during preload
+					bot.logger.Warn("Preload read error", zap.String("title", song.Title), zap.Error(err), zap.Int("buffered_bytes", totalRead))
+				} else {
+					bot.logger.Debug("Preload reached EOF", zap.String("title", song.Title), zap.Int("buffered_bytes", totalRead))
 				}
 				return
 			}

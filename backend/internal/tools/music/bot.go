@@ -4,7 +4,9 @@ import (
 	"sync"
 	"time"
 
+	"ezra-clone/backend/internal/adapter"
 	"github.com/bwmarrin/discordgo"
+	"go.uber.org/zap"
 )
 
 // Constants for music bot configuration
@@ -103,10 +105,16 @@ type MusicBot struct {
 	GeneratingPlaylistMsgID     string     // Message ID for "generating playlist" message
 	GeneratingPlaylistChannelID string     // Channel ID for the generating message
 	GeneratingPlaylistMu        sync.Mutex // Mutex for generating playlist message updates
+
+	// LLM adapter for playlist/radio generation
+	llmAdapter *adapter.LLMAdapter
+
+	// Logger for structured logging
+	logger *zap.Logger
 }
 
 // NewMusicBot creates a new MusicBot instance for a guild
-func NewMusicBot(guildID string, session *discordgo.Session) *MusicBot {
+func NewMusicBot(guildID string, session *discordgo.Session, logger *zap.Logger) *MusicBot {
 	return &MusicBot{
 		GuildID:         guildID,
 		Session:         session,
@@ -117,6 +125,7 @@ func NewMusicBot(guildID string, session *discordgo.Session) *MusicBot {
 		ResumeChan:      make(chan bool, 1),
 		SeekChan:        make(chan time.Duration, 1),
 		RadioHistoryMap: make(map[string]struct{}),
+		logger:          logger,
 	}
 }
 
@@ -180,14 +189,18 @@ func (b *MusicBot) GetRecentRadioSongs(count int) []string {
 
 // MusicManager manages music bot instances per guild
 type MusicManager struct {
-	bots map[string]*MusicBot
-	mu   sync.RWMutex
+	bots       map[string]*MusicBot
+	llmAdapter *adapter.LLMAdapter
+	logger     *zap.Logger
+	mu         sync.RWMutex
 }
 
 // NewMusicManager creates a new music manager
-func NewMusicManager() *MusicManager {
+func NewMusicManager(llmAdapter *adapter.LLMAdapter, logger *zap.Logger) *MusicManager {
 	return &MusicManager{
-		bots: make(map[string]*MusicBot),
+		bots:       make(map[string]*MusicBot),
+		llmAdapter: llmAdapter,
+		logger:     logger,
 	}
 }
 
@@ -200,7 +213,8 @@ func (m *MusicManager) GetBot(guildID string, session *discordgo.Session) *Music
 		return bot
 	}
 
-	bot := NewMusicBot(guildID, session)
+	bot := NewMusicBot(guildID, session, m.logger)
+	bot.llmAdapter = m.llmAdapter // Store adapter in bot for easy access
 	m.bots[guildID] = bot
 	return bot
 }

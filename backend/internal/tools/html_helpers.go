@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"html"
 	"strings"
 )
 
@@ -30,44 +31,67 @@ func extractTextFromHTML(html string) string {
 	// Clean up whitespace - normalize to single spaces
 	content = strings.Join(strings.Fields(content), " ")
 	
-	// Split into sentences/paragraphs and filter out noise
-	words := strings.Fields(content)
-	var meaningfulWords []string
-	skipNext := false
-	
-	for i, word := range words {
-		if skipNext {
-			skipNext = false
-			continue
+	// Less aggressive filtering - preserve more content
+	// Only filter if content is very long (likely has lots of noise)
+	if len(content) > 5000 {
+		// Split into sentences/paragraphs and filter out noise
+		words := strings.Fields(content)
+		var meaningfulWords []string
+		
+		for i, word := range words {
+			// Skip very short words that are likely noise (but be less aggressive)
+			if len(word) < 1 {
+				continue
+			}
+			
+			// Only skip UI noise in the first 5% of content (header/nav area)
+			wordLower := strings.ToLower(strings.Trim(word, ".,!?;:"))
+			if isLikelyUINoise(wordLower) && i < len(words)/20 {
+				// Only skip if it's very early in the content
+				continue
+			}
+			
+			meaningfulWords = append(meaningfulWords, word)
 		}
 		
-		// Skip very short words that are likely noise
-		if len(word) < 2 {
-			continue
-		}
+		content = strings.Join(meaningfulWords, " ")
 		
-		// Skip common UI/navigation words in isolation
-		wordLower := strings.ToLower(strings.Trim(word, ".,!?;:"))
-		if isLikelyUINoise(wordLower) && i < len(words)/10 {
-			// Only skip if it's early in the content (likely header/nav)
-			continue
-		}
-		
-		meaningfulWords = append(meaningfulWords, word)
+		// Final cleanup - remove excessive repetition (but be less aggressive)
+		content = removeExcessiveRepetition(content)
 	}
 	
-	content = strings.Join(meaningfulWords, " ")
-	
-	// Final cleanup - remove excessive repetition
-	content = removeExcessiveRepetition(content)
-	
 	return content
+}
+
+// decodeHTMLEntities decodes common HTML entities
+// Moved here from web_executor.go for reuse across multiple files
+func decodeHTMLEntities(s string) string {
+	// Use Go's html package for proper entity decoding
+	decoded := html.UnescapeString(s)
+	
+	// Also handle some common entities that might not be in the standard set
+	replacements := map[string]string{
+		"&mdash;":  "—",
+		"&ndash;":  "–",
+		"&hellip;": "...",
+		"&copy;":   "©",
+		"&reg;":    "®",
+		"&trade;":  "™",
+		"&nbsp;":   " ",
+	}
+	
+	for entity, char := range replacements {
+		decoded = strings.ReplaceAll(decoded, entity, char)
+	}
+	
+	return decoded
 }
 
 // removeExcessiveRepetition removes repeated words/phrases that are likely noise
 func removeExcessiveRepetition(text string) string {
 	words := strings.Fields(text)
-	if len(words) < 10 {
+	if len(words) < 50 {
+		// Don't filter short texts - they're likely already clean
 		return text
 	}
 	
@@ -78,8 +102,9 @@ func removeExcessiveRepetition(text string) string {
 		wordLower := strings.ToLower(word)
 		seen[wordLower]++
 		
-		// If a word appears more than 20 times in a short text, it's likely noise
-		if seen[wordLower] > 20 && len(words) < 200 {
+		// Only filter if a word appears way too many times (likely navigation/UI repetition)
+		// Be more lenient - only filter if it appears > 50 times in a medium text
+		if seen[wordLower] > 50 && len(words) < 500 {
 			continue
 		}
 		
@@ -196,5 +221,34 @@ func stripHTMLTags(s string) string {
 	text := result.String()
 	text = strings.Join(strings.Fields(text), " ")
 	return text
+}
+
+// extractTextFromHTMLSimple is a simpler, less aggressive extraction that preserves more content
+func extractTextFromHTMLSimple(html string) string {
+	// Remove script and style tags completely
+	html = removeTagContent(html, "script")
+	html = removeTagContent(html, "style")
+	html = removeTagContent(html, "noscript")
+	
+	// Remove comments
+	html = removeComments(html)
+	
+	// Remove all remaining HTML tags to get plain text
+	content := stripHTMLTags(html)
+	
+	// Decode HTML entities (this function is in web_executor.go, so we'll do basic decoding here)
+	// Basic entity decoding
+	content = strings.ReplaceAll(content, "&amp;", "&")
+	content = strings.ReplaceAll(content, "&lt;", "<")
+	content = strings.ReplaceAll(content, "&gt;", ">")
+	content = strings.ReplaceAll(content, "&quot;", "\"")
+	content = strings.ReplaceAll(content, "&#39;", "'")
+	content = strings.ReplaceAll(content, "&apos;", "'")
+	content = strings.ReplaceAll(content, "&nbsp;", " ")
+	
+	// Clean up whitespace - normalize to single spaces, but preserve structure
+	content = strings.Join(strings.Fields(content), " ")
+	
+	return content
 }
 

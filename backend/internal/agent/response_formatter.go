@@ -26,6 +26,7 @@ func isInformationalTool(toolName string) bool {
 		tools.ToolGetHistory:         true,
 		tools.ToolDiscordReadHistory: true,
 		tools.ToolAnalyzeUserStyle:   true,
+		tools.ToolSummarizeWebsite:  true,
 	}
 	return informationalTools[toolName]
 }
@@ -221,6 +222,28 @@ func formatToolResponseWithEmbeds(toolName string, result *tools.ToolResult) (st
 			return result.Message, nil
 		}
 		return "I fetched the webpage but couldn't extract the content.", nil
+
+	case tools.ToolSummarizeWebsite:
+		// Format website summary
+		if summaryData, ok := result.Data.(map[string]interface{}); ok {
+			url := summaryData["url"]
+			summary := summaryData["summary"]
+			title := summaryData["title"]
+			
+			if summaryStr, ok := summary.(string); ok && summaryStr != "" {
+				response := ""
+				if titleStr, ok := title.(string); ok && titleStr != "" {
+					response = fmt.Sprintf("**%s**\n\n", titleStr)
+				}
+				response += fmt.Sprintf("Summary of %v:\n\n%s", url, summaryStr)
+				return response, nil
+			}
+		}
+		// Fallback to message if data format is unexpected
+		if result.Message != "" {
+			return result.Message, nil
+		}
+		return "I generated a summary but couldn't retrieve it.", nil
 
 	default:
 		return "", nil // Let LLM handle other tools

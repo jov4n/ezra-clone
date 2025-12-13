@@ -7,8 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"ezra-clone/backend/internal/adapter"
 	"ezra-clone/backend/internal/agent"
 	"ezra-clone/backend/internal/discord"
@@ -16,6 +14,9 @@ import (
 	"ezra-clone/backend/internal/tools"
 	"ezra-clone/backend/pkg/config"
 	"ezra-clone/backend/pkg/logger"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"go.uber.org/zap"
 )
 
@@ -60,6 +61,9 @@ func main() {
 	llmAdapter := adapter.NewLLMAdapter(cfg.LiteLLMURL, cfg.OpenRouterAPIKey, cfg.ModelID)
 	agentOrch := agent.NewOrchestrator(graphRepo, llmAdapter)
 
+	// Set LLM adapter for website summarization (uses LiteLLM)
+	agentOrch.SetLLMAdapterForTools(llmAdapter)
+
 	// Create Discord session
 	dg, err := discordgo.New("Bot " + cfg.DiscordBotToken)
 	if err != nil {
@@ -70,7 +74,7 @@ func main() {
 	discordExecutor := tools.NewDiscordExecutor(dg, log)
 	discordExecutor.SetRepository(graphRepo) // Enable RAG memory access
 	agentOrch.SetDiscordExecutor(discordExecutor)
-	
+
 	// Initialize ComfyUI executor (always initialize for prompt enhancement, RunPod optional for image generation)
 	comfyExecutor := tools.NewComfyExecutor(llmAdapter, cfg)
 	agentOrch.SetComfyExecutor(comfyExecutor)
@@ -81,7 +85,7 @@ func main() {
 	}
 
 	// Initialize Music executor
-	musicExecutor := tools.NewMusicExecutor(dg, log, cfg.OpenRouterAPIKey)
+	musicExecutor := tools.NewMusicExecutor(dg, log, llmAdapter)
 	agentOrch.SetMusicExecutor(musicExecutor)
 	log.Info("Music executor initialized")
 
@@ -98,6 +102,16 @@ func main() {
 		zap.String("mimic_channel_id", cfg.MimicChannelID),
 	)
 
+	// Create shutdown channel for programmatic shutdown
+	shutdownChan := make(chan os.Signal, 1)
+
+	// Initialize System executor with shutdown function
+	systemExecutor := tools.NewSystemExecutor(dg, log, func() {
+		shutdownChan <- os.Interrupt
+	})
+	agentOrch.SetSystemExecutor(systemExecutor)
+	log.Info("System executor initialized")
+
 	// Create message handler
 	messageHandler := discord.NewHandler(agentOrch, graphRepo, log)
 
@@ -113,7 +127,7 @@ func main() {
 	// - IntentsDirectMessages: Read DM messages
 	// - IntentsGuildVoiceStates: Track voice state changes (REQUIRED for voice connections)
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsGuildVoiceStates
-	
+
 	// Log intents for debugging
 	log.Info("Discord bot intents configured",
 		zap.Bool("guilds", (dg.Identify.Intents&discordgo.IntentsGuilds) != 0),
@@ -130,13 +144,9 @@ func main() {
 
 	log.Info("Discord bot is running. Press CTRL-C to exit.")
 
-	// Wait for interrupt signal
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
+	// Wait for interrupt signal (from CTRL-C or programmatic shutdown)
+	signal.Notify(shutdownChan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	<-shutdownChan
 
 	log.Info("Shutting down Discord bot...")
 }
-
-
-

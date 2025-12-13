@@ -1,116 +1,49 @@
 package sources
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+
+	"ezra-clone/backend/internal/adapter"
 )
 
-const OpenRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
-
-var OpenRouterAPIKey = ""
-
-// SetOpenRouterAPIKey sets the OpenRouter API key
-func SetOpenRouterAPIKey(key string) {
-	OpenRouterAPIKey = key
-}
-
-// GeneratePlaylistQueries generates song search queries using OpenRouter API
-func GeneratePlaylistQueries(query string) []string {
-	if OpenRouterAPIKey == "" {
+// GeneratePlaylistQueries generates song search queries using LiteLLM adapter
+func GeneratePlaylistQueries(ctx context.Context, llmAdapter *adapter.LLMAdapter, query string) []string {
+	if llmAdapter == nil {
 		return []string{}
 	}
 
-	// Use a free-tier model
-	model := "google/gemini-2.5-flash" // Automatically selects the best free model
-	// Alternative free models: "mistralai/mixtral-8x7b-instruct", "meta-llama/llama-3-8b-instruct"
+	// Create context with timeout
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
 	systemPrompt := "You are a music playlist generator. Generate song suggestions based on similarity and songs the user may like in the format 'Artist - Song Title', one per line. Only output the song suggestions, nothing else."
 	userPrompt := fmt.Sprintf("Generate 20-25 song suggestions for a playlist based on: %s", query)
 
-	requestBody := map[string]interface{}{
-		"model":       model,
-		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
-		"max_tokens":  DefaultOpenRouterPlaylistMaxTokens,
-		"temperature": 0.8,
-	}
-
-	jsonData, err := json.Marshal(requestBody)
+	response, err := llmAdapter.Generate(reqCtx, systemPrompt, userPrompt, []adapter.Tool{})
 	if err != nil {
 		return []string{}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", OpenRouterAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
+	if response.Content == "" {
 		return []string{}
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", OpenRouterAPIKey))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/System-Nebula/music-botting/tree/refactored")
-	req.Header.Set("X-Title", "Ezra Music Bot - Playlist Generator")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return []string{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		io.ReadAll(resp.Body)
-		return []string{}
-	}
-
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return []string{}
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return []string{}
-	}
-
-	if result.Error.Message != "" {
-		return []string{}
-	}
-
-	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
-		return []string{}
-	}
-
-	content := result.Choices[0].Message.Content
-	queries := parseSongQueries(content)
-
+	queries := parseSongQueries(response.Content)
 	return queries
 }
 
-// GenerateRadioSuggestions generates song suggestions based on seed and recently played songs
-func GenerateRadioSuggestions(seed string, recentSongs []string) []string {
-	if OpenRouterAPIKey == "" {
+// GenerateRadioSuggestions generates song suggestions based on seed and recently played songs using LiteLLM adapter
+func GenerateRadioSuggestions(ctx context.Context, llmAdapter *adapter.LLMAdapter, seed string, recentSongs []string) []string {
+	if llmAdapter == nil {
 		return []string{}
 	}
 
-	model := "google/gemini-2.5-flash"
+	// Create context with timeout
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 
 	// Build context from recent songs
 	recentContext := ""
@@ -121,74 +54,16 @@ func GenerateRadioSuggestions(seed string, recentSongs []string) []string {
 	systemPrompt := "You are a music radio DJ. Generate song suggestions that flow well together, maintaining a consistent mood and style. Format each suggestion as 'Artist - Song Title', one per line. Only output the song suggestions, nothing else."
 	userPrompt := fmt.Sprintf("The listener started a radio station based on: %s%s\n\nGenerate 8-10 new song suggestions that would fit this radio station perfectly.", seed, recentContext)
 
-	requestBody := map[string]interface{}{
-		"model":       model,
-		"messages":    []map[string]string{{"role": "system", "content": systemPrompt}, {"role": "user", "content": userPrompt}},
-		"max_tokens":  DefaultOpenRouterMaxTokens,
-		"temperature": 0.9, // Slightly higher temperature for more variety
-	}
-
-	jsonData, err := json.Marshal(requestBody)
+	response, err := llmAdapter.Generate(reqCtx, systemPrompt, userPrompt, []adapter.Tool{})
 	if err != nil {
 		return []string{}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", OpenRouterAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
+	if response.Content == "" {
 		return []string{}
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", OpenRouterAPIKey))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/System-Nebula/music-botting/tree/refactored")
-	req.Header.Set("X-Title", "Ezra Music Bot - Infinite Radio")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return []string{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		io.ReadAll(resp.Body)
-		return []string{}
-	}
-
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return []string{}
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return []string{}
-	}
-
-	if result.Error.Message != "" {
-		return []string{}
-	}
-
-	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
-		return []string{}
-	}
-
-	content := result.Choices[0].Message.Content
-	queries := parseSongQueries(content)
-
+	queries := parseSongQueries(response.Content)
 	return queries
 }
 

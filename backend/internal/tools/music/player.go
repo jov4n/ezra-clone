@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"go.uber.org/zap"
 )
 
 // readCloserWrapper wraps an io.Reader to implement io.ReadCloser
@@ -167,7 +167,7 @@ func PlayQueue(bot *MusicBot, session *discordgo.Session, channelID string) {
 				err = PlaySong(bot, song)
 			}
 			if err != nil {
-				log.Printf("Error playing song (retry failed): %v", err)
+				bot.logger.Error("Error playing song (retry failed)", zap.Error(err))
 				if bot.VoiceConn != nil {
 					bot.Mu.Lock()
 					bot.VoiceConn.Speaking(false)
@@ -224,7 +224,7 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 	vc := bot.VoiceConn
 
 	if seekSeconds > 0 {
-		log.Printf("⏩ Seeking to: %d seconds (will skip frames in demuxer)", seekSeconds)
+		bot.logger.Info("Seeking to position", zap.Int("seconds", seekSeconds))
 	}
 
 	// Check if this song is preloaded (only use preload if not seeking)
@@ -242,8 +242,10 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 			streamReady := preloaded.StreamReady
 			bot.PreloadMu.Unlock()
 
+			streamReadyReceived := false
 			select {
 			case <-streamReady:
+				streamReadyReceived = true
 			case <-time.After(3 * time.Second):
 			}
 
@@ -252,15 +254,35 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 			preloaded = bot.Preloaded
 			if preloaded != nil && preloaded.Song.URL == song.URL && preloaded.Preloaded && preloaded.OpusOut != nil {
 				preloaded.Mu.Lock()
-				hasBuffer := len(preloaded.Buffer) > 0
+				bufferSize := len(preloaded.Buffer)
 				reading := preloaded.Reading
 				readErr := preloaded.ReadErr
 				preloaded.Mu.Unlock()
 
-				// Use preload if we have buffer data
-				if hasBuffer && (readErr == nil || readErr == io.EOF) {
+				// Use preload if:
+				// 1. Stream is ready (signaled) and still reading, OR
+				// 2. We have buffer data and no errors (or just EOF)
+				// This allows using preload even with small buffers if the stream is active
+				canUsePreload := false
+				if streamReadyReceived && reading && readErr == nil {
+					// Stream is ready and actively reading - use it even with small buffer
+					canUsePreload = true
+					bot.logger.Debug("Using preloaded stream (stream ready)", zap.Int("buffer_bytes", bufferSize), zap.Bool("reading", reading))
+				} else if bufferSize > 0 && (readErr == nil || readErr == io.EOF) {
+					// We have buffered data and no errors
+					canUsePreload = true
+					bot.logger.Debug("Using preloaded stream", zap.Int("buffer_bytes", bufferSize), zap.Bool("reading", reading), zap.Error(readErr))
+				} else {
+					// Log why we're not using the preload
+					bot.logger.Debug("Preload available but not usable", 
+						zap.Int("buffer_bytes", bufferSize), 
+						zap.Bool("reading", reading), 
+						zap.Error(readErr), 
+						zap.Bool("stream_ready", streamReadyReceived))
+				}
+
+				if canUsePreload {
 					usePreloaded = true
-					log.Printf("Using preloaded stream (buffer: %d bytes, reading: %v)", len(preloaded.Buffer), reading)
 
 					// Take ownership of the preloaded data
 					preloaded.Mu.Lock()
@@ -283,16 +305,34 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 					// Clear the preload (we've taken ownership)
 					bot.Preloaded = nil
 				}
+			} else {
+				// Preload doesn't match or was cleared
+				if preloaded == nil {
+					bot.logger.Debug("Preload was cleared before use")
+				} else if preloaded.Song.URL != song.URL {
+					bot.logger.Debug("Preload URL mismatch", zap.String("expected", song.URL), zap.String("got", preloaded.Song.URL))
+				} else if !preloaded.Preloaded {
+					bot.logger.Debug("Preload marked as not preloaded")
+				} else if preloaded.OpusOut == nil {
+					bot.logger.Debug("Preload has nil OpusOut")
+				}
 			}
 			bot.PreloadMu.Unlock()
 		} else {
+			if preloaded == nil {
+				bot.logger.Debug("No preload available for song", zap.String("url", song.URL))
+			} else if preloaded.Song.URL != song.URL {
+				bot.logger.Debug("Preload URL mismatch", zap.String("expected", song.URL), zap.String("got", preloaded.Song.URL))
+			} else if !preloaded.Preloaded {
+				bot.logger.Debug("Preload exists but not marked as preloaded")
+			}
 			bot.PreloadMu.Unlock()
 		}
 	}
 
 	if !usePreloaded {
 		// Start fresh download
-		log.Printf("Starting fresh stream (preload not available)")
+		bot.logger.Debug("Starting fresh stream (preload not available)")
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		cancel = cancelFunc
 
@@ -300,7 +340,7 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 		var err error
 
 		if song.Source == "twitch" {
-			ytdlpCmd, audioOut, err = startTwitchStream(ctx, song.URL)
+			ytdlpCmd, audioOut, err = startTwitchStream(ctx, song.URL, bot.logger)
 			if err != nil {
 				cancel()
 				return err
@@ -308,7 +348,7 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 			// Twitch streams: ffmpeg outputs OGG Opus directly
 			opusOut = audioOut
 		} else {
-			ytdlpCmd, audioOut, err = startYouTubeStream(ctx, song.URL)
+			ytdlpCmd, audioOut, err = startYouTubeStream(ctx, song.URL, bot.logger)
 			if err != nil {
 				cancel()
 				return err
@@ -357,567 +397,3 @@ func PlaySongWithSeek(bot *MusicBot, song Song, seekSeconds int) error {
 	return err
 }
 
-func startYouTubeStream(ctx context.Context, url string) (*exec.Cmd, io.ReadCloser, error) {
-	args := []string{
-		"-f", "251/250/bestaudio[ext=webm]/bestaudio/best",
-		"-o", "-",
-		"--no-playlist",
-		url,
-	}
-
-	cmd := exec.CommandContext(ctx, YtdlpExecutable, args...)
-
-	audioOut, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	log.Printf("Starting yt-dlp (preferring opus format in WebM)...")
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
-	}
-
-	return cmd, audioOut, nil
-}
-
-func startTwitchStream(ctx context.Context, url string) (*exec.Cmd, io.ReadCloser, error) {
-	// Check if ffmpeg is available
-	if FfmpegExecutable == "" {
-		return nil, nil, fmt.Errorf("ffmpeg not found - required for Twitch streams")
-	}
-
-	// Start yt-dlp with live stream options
-	ytdlpCmd := exec.CommandContext(ctx, YtdlpExecutable,
-		"-o", "-",
-		"--no-playlist",
-		"-f", "bestaudio/best",
-		"--no-live-from-start",
-		"--no-part",
-		"--no-cache-dir",
-		url)
-
-	ytdlpOut, err := ytdlpCmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	ytdlpCmd.Stderr = io.Discard
-
-	if err := ytdlpCmd.Start(); err != nil {
-		return nil, nil, err
-	}
-	log.Printf("Started yt-dlp process (PID: %d)", ytdlpCmd.Process.Pid)
-
-	// Start ffmpeg - output OGG Opus directly
-	ffmpegCmd := exec.CommandContext(ctx, FfmpegExecutable,
-		"-hide_banner",
-		"-loglevel", "warning",
-		"-i", "pipe:0",
-		"-vn",
-		"-c:a", "libopus",
-		"-b:a", "128k",
-		"-ar", "48000",
-		"-ac", "2",
-		"-application", "audio",
-		"-frame_duration", "20",
-		"-f", "ogg",
-		"pipe:1")
-
-	ffmpegCmd.Stdin = ytdlpOut
-	ffmpegOut, err := ffmpegCmd.StdoutPipe()
-	if err != nil {
-		ytdlpCmd.Process.Kill()
-		return nil, nil, err
-	}
-
-	ffmpegCmd.Stderr = io.Discard
-
-	if err := ffmpegCmd.Start(); err != nil {
-		ytdlpCmd.Process.Kill()
-		return nil, nil, err
-	}
-	log.Printf("Started ffmpeg process (PID: %d)", ffmpegCmd.Process.Pid)
-
-	// Clean up yt-dlp when ffmpeg exits
-	go func() {
-		ffmpegCmd.Wait()
-		if ytdlpCmd.Process != nil {
-			ytdlpCmd.Process.Kill()
-		}
-	}()
-
-	return ffmpegCmd, ffmpegOut, nil
-}
-
-func playAudioStream(bot *MusicBot, vc *discordgo.VoiceConnection, opusOut io.ReadCloser, usePreloaded bool, ytdlpCmd *exec.Cmd, cancel func()) error {
-	// Note: temp-music-botting doesn't check Ready here - it just tries to use the connection
-	// If the websocket failed, errors will occur when trying to send data, and we'll handle them
-
-	frameCount := 0
-	oggHeader := make([]byte, 27)
-
-	// Track song start time for position tracking
-	bot.Mu.Lock()
-	if bot.SongStartTime.IsZero() {
-		bot.SongStartTime = time.Now()
-	}
-	bot.CurrentPos = 0
-	bot.IsPaused = false
-	bot.Mu.Unlock()
-
-	// Helper to cleanup stream resources
-	cleanupStream := func() {
-		if !usePreloaded && cancel != nil {
-			cancel()
-			if ytdlpCmd != nil && ytdlpCmd.Process != nil {
-				ytdlpCmd.Process.Kill()
-			}
-		} else {
-			if opusOut != nil {
-				opusOut.Close()
-			}
-		}
-	}
-
-	// Note: temp-music-botting doesn't check Ready here - it just tries to use the connection
-	// If the websocket failed, errors will occur when trying to send data, and we'll handle them
-
-	for {
-		// Check for pause state
-		bot.Mu.Lock()
-		isPaused := bot.IsPaused
-		bot.Mu.Unlock()
-
-		if isPaused {
-			// Wait for resume or other control signals
-			select {
-			case <-bot.ResumeChan:
-				bot.Mu.Lock()
-				bot.IsPaused = false
-				bot.SongStartTime = time.Now().Add(-bot.PausedAt)
-				vc.Speaking(true)
-				bot.IsSpeaking = true
-				bot.Mu.Unlock()
-				continue
-			case <-bot.SkipChan:
-				cleanupStream()
-				return nil
-			case <-bot.StopChan:
-				cleanupStream()
-				return nil
-			case seekPos := <-bot.SeekChan:
-				cleanupStream()
-				return &SeekError{Position: seekPos}
-			case <-time.After(100 * time.Millisecond):
-				continue
-			}
-		}
-
-		select {
-		case <-bot.SkipChan:
-			cleanupStream()
-			return nil
-		case <-bot.StopChan:
-			bot.PreloadMu.Lock()
-			if bot.Preloaded != nil {
-				cleanupPreloadedSong(bot.Preloaded)
-				bot.Preloaded = nil
-			}
-			bot.PreloadMu.Unlock()
-			cleanupStream()
-			return nil
-		case <-bot.PauseChan:
-			bot.Mu.Lock()
-			bot.IsPaused = true
-			bot.PausedAt = time.Since(bot.SongStartTime)
-			vc.Speaking(false)
-			bot.IsSpeaking = false
-			bot.Mu.Unlock()
-			continue
-		case seekPos := <-bot.SeekChan:
-			cleanupStream()
-			return &SeekError{Position: seekPos}
-		default:
-			// Read OGG page header
-			_, err := io.ReadFull(opusOut, oggHeader)
-			if err != nil {
-				if err == io.EOF || err == io.ErrUnexpectedEOF {
-					if !usePreloaded {
-						if ytdlpCmd != nil {
-							ytdlpCmd.Wait()
-						}
-						if cancel != nil {
-							cancel()
-						}
-					} else {
-						if opusOut != nil {
-							opusOut.Close()
-						}
-						if ytdlpCmd != nil {
-							ytdlpCmd.Wait()
-						}
-					}
-					return nil
-				}
-				if strings.Contains(err.Error(), "file already closed") || strings.Contains(err.Error(), "use of closed") || strings.Contains(err.Error(), "stream closed") {
-					log.Printf("Stream was closed (likely due to skip or premature closure)")
-					return fmt.Errorf("stream closed, will retry")
-				}
-				return err
-			}
-
-			// Check OGG magic number
-			if string(oggHeader[0:4]) != "OggS" {
-				return fmt.Errorf("invalid OGG header")
-			}
-
-			// Read segment table
-			segCount := int(oggHeader[26])
-			if segCount == 0 {
-				continue
-			}
-
-			segTable := make([]byte, segCount)
-			_, err = io.ReadFull(opusOut, segTable)
-			if err != nil {
-				return err
-			}
-
-			// Read segments and send opus packets
-			currentPacket := make([]byte, 0, 4000)
-			for i := 0; i < segCount; i++ {
-				segLen := int(segTable[i])
-				if segLen > 0 {
-					segData := make([]byte, segLen)
-					n, err := io.ReadFull(opusOut, segData)
-					if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-						return err
-					}
-					if n > 0 {
-						currentPacket = append(currentPacket, segData[:n]...)
-					}
-
-					if segLen < 255 && len(currentPacket) > 0 {
-						frameCount++
-						packetData := make([]byte, len(currentPacket))
-						copy(packetData, currentPacket)
-
-						// Update position every 50 frames (~1 second at 20ms per frame)
-						if frameCount%50 == 0 {
-							bot.Mu.Lock()
-							bot.CurrentPos = time.Since(bot.SongStartTime)
-							bot.Mu.Unlock()
-						}
-
-						// Send to voice connection - blocks until channel is ready (like old bot)
-						// No default case - we want to block and wait for the channel
-						select {
-						case vc.OpusSend <- packetData:
-							// Successfully sent packet
-						case <-bot.SkipChan:
-							return nil
-						case <-bot.StopChan:
-							return nil
-						case <-bot.PauseChan:
-							bot.Mu.Lock()
-							bot.IsPaused = true
-							bot.PausedAt = time.Since(bot.SongStartTime)
-							if vc != nil {
-								vc.Speaking(false)
-							}
-							bot.IsSpeaking = false
-							bot.Mu.Unlock()
-						case seekPos := <-bot.SeekChan:
-							cleanupStream()
-							return &SeekError{Position: seekPos}
-						}
-
-						currentPacket = currentPacket[:0]
-					}
-				}
-			}
-
-			// Send remaining packet if any
-			if len(currentPacket) > 0 {
-				frameCount++
-				packetData := make([]byte, len(currentPacket))
-				copy(packetData, currentPacket)
-
-				select {
-				case vc.OpusSend <- packetData:
-					// Successfully sent packet
-				case <-bot.SkipChan:
-					return nil
-				case <-bot.StopChan:
-					return nil
-				}
-			}
-		}
-	}
-}
-
-// refillRadioQueue generates and adds new songs to the queue when radio mode is enabled
-func refillRadioQueue(bot *MusicBot, session *discordgo.Session) {
-	// Prevent concurrent refills
-	bot.RadioMu.Lock()
-	if bot.RadioRefilling || !bot.RadioEnabled {
-		bot.RadioMu.Unlock()
-		return
-	}
-	bot.RadioRefilling = true
-	seed := bot.RadioSeed
-	bot.RadioMu.Unlock()
-
-	defer func() {
-		bot.RadioMu.Lock()
-		bot.RadioRefilling = false
-		bot.RadioMu.Unlock()
-	}()
-
-	// Get recent songs for context
-	recentSongs := bot.GetRecentRadioSongs(5)
-
-	// Generate new song suggestions using OpenRouter
-	// Import sources for GenerateRadioSuggestions
-	suggestions := GenerateRadioSuggestions(seed, recentSongs)
-
-	if len(suggestions) == 0 {
-		return
-	}
-
-	// Search YouTube for each suggestion
-	addedCount := 0
-	maxToAdd := 6
-	maxDurationSeconds := 420
-
-	for _, query := range suggestions {
-		if addedCount >= maxToAdd {
-			break
-		}
-
-		song := SearchYouTube(query, "Radio")
-		if song.Title == "" || bot.IsInRadioHistory(song.URL) {
-			continue
-		}
-
-		if !IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
-			continue
-		}
-
-		bot.Playlist.Lock()
-		bot.Playlist.Songs = append(bot.Playlist.Songs, song)
-		bot.Playlist.Unlock()
-		bot.AddToRadioHistory(song.URL)
-		addedCount++
-	}
-
-	if addedCount > 0 {
-	}
-}
-
-// updateGeneratingPlaylistMessage updates the generating playlist progress message
-func updateGeneratingPlaylistMessage(bot *MusicBot, session *discordgo.Session, foundCount, totalCount int, query string) {
-	bot.GeneratingPlaylistMu.Lock()
-	msgID := bot.GeneratingPlaylistMsgID
-	channelID := bot.GeneratingPlaylistChannelID
-	bot.GeneratingPlaylistMu.Unlock()
-
-	if msgID == "" || channelID == "" {
-		return
-	}
-
-	// Create progress embed
-	embed := &discordgo.MessageEmbed{
-		Title:       "🎵 Generating Playlist",
-		Description: fmt.Sprintf("Generating and queuing songs based on: *%s*\n\n**Found %d/%d songs...**", query, foundCount, totalCount),
-		Color:       0x9b59b6, // Purple
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Songs will start playing as they're found",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	// Update the message
-	_, err := session.ChannelMessageEditEmbed(channelID, msgID, embed)
-	if err != nil {
-		log.Printf("Failed to update generating playlist message: %v", err)
-	}
-}
-
-// GenerateAndPlayPlaylist generates a playlist and starts playback (streaming mode)
-func GenerateAndPlayPlaylist(query, requester string, bot *MusicBot, session *discordgo.Session, channelID string) []Song {
-	log.Printf("Generating playlist for query: %s (streaming mode)", query)
-
-	// Generate playlist queries first to know expected count
-	queries := GeneratePlaylistQueries(query)
-	expectedCount := len(queries)
-	if expectedCount == 0 {
-		// Fallback: will search directly, expect 1 song
-		expectedCount = 1
-	}
-
-	// Send initial "generating playlist" message
-	initialEmbed := &discordgo.MessageEmbed{
-		Title:       "🎵 Generating Playlist",
-		Description: fmt.Sprintf("Generating and queuing songs based on: *%s*\n\n**Found 0/%d songs...**", query, expectedCount),
-		Color:       0x9b59b6, // Purple
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Songs will start playing as they're found",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
-
-	msg, err := session.ChannelMessageSendEmbed(channelID, initialEmbed)
-	if err != nil {
-		log.Printf("Failed to send generating playlist message: %v", err)
-	} else {
-		// Store message ID and channel ID
-		bot.GeneratingPlaylistMu.Lock()
-		bot.GeneratingPlaylistMsgID = msg.ID
-		bot.GeneratingPlaylistChannelID = channelID
-		bot.GeneratingPlaylistMu.Unlock()
-	}
-
-	// Create channel for streaming songs
-	songChan := make(chan Song, 20)
-	startedPlaying := false
-	foundCount := 0
-	var foundCountMu sync.Mutex
-
-	// Generate playlist queries using OpenRouter in background
-	go func() {
-		defer close(songChan)
-
-		if len(queries) == 0 {
-			// Fallback: search YouTube directly
-			song := SearchYouTube(query, requester)
-			if song.Title != "" {
-				foundCountMu.Lock()
-				foundCount++
-				foundCountMu.Unlock()
-				updateGeneratingPlaylistMessage(bot, session, foundCount, expectedCount, query)
-				select {
-				case songChan <- song:
-				default:
-				}
-			}
-			return
-		}
-
-		// Search YouTube for each query and stream results
-		maxDurationSeconds := 360 // 6 minutes max
-		for _, queryStr := range queries {
-			song := SearchYouTube(queryStr, requester)
-			if song.Title != "" && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
-				foundCountMu.Lock()
-				foundCount++
-				currentFound := foundCount
-				foundCountMu.Unlock()
-				
-				// Update progress message
-				updateGeneratingPlaylistMessage(bot, session, currentFound, expectedCount, query)
-				
-				select {
-				case songChan <- song:
-				default:
-				}
-			}
-		}
-	}()
-
-	// Add songs to queue as they come in and start playback immediately
-	go func() {
-		for song := range songChan {
-			bot.Playlist.Lock()
-			wasEmpty := len(bot.Playlist.Songs) == 0
-			bot.Playlist.Songs = append(bot.Playlist.Songs, song)
-			bot.Playlist.Unlock()
-
-			// Start playback if queue was empty and we haven't started yet
-			bot.Mu.Lock()
-			isCurrentlyPlaying := bot.IsPlaying
-			bot.Mu.Unlock()
-
-			if wasEmpty && !startedPlaying && !isCurrentlyPlaying {
-				startedPlaying = true
-				go PlayQueue(bot, session, channelID)
-			}
-		}
-
-		// If channel closed and we haven't started, start now
-		bot.Playlist.Lock()
-		hasSongs := len(bot.Playlist.Songs) > 0
-		bot.Playlist.Unlock()
-
-		bot.Mu.Lock()
-		isCurrentlyPlaying := bot.IsPlaying
-		bot.Mu.Unlock()
-
-		if hasSongs && !startedPlaying && !isCurrentlyPlaying {
-			go PlayQueue(bot, session, channelID)
-		}
-
-		// Final update to show completion
-		foundCountMu.Lock()
-		finalCount := foundCount
-		foundCountMu.Unlock()
-		
-		// Update message one final time with completion status
-		bot.GeneratingPlaylistMu.Lock()
-		msgID := bot.GeneratingPlaylistMsgID
-		bot.GeneratingPlaylistMu.Unlock()
-		
-		if msgID != "" {
-			finalEmbed := &discordgo.MessageEmbed{
-				Title:       "🎵 Playlist Generated",
-				Description: fmt.Sprintf("Generated and queued **%d songs** based on: *%s*\n\nSongs are now playing! 🎶", finalCount, query),
-				Color:       0x2ecc71, // Green
-				Footer: &discordgo.MessageEmbedFooter{
-					Text: "Enjoy your playlist!",
-				},
-				Timestamp: time.Now().Format(time.RFC3339),
-			}
-			_, err := session.ChannelMessageEditEmbed(channelID, msgID, finalEmbed)
-			if err != nil {
-				log.Printf("Failed to update final playlist message: %v", err)
-			}
-		}
-	}()
-
-	// Return empty slice initially, songs are added via channel
-	return []Song{}
-}
-
-// StartRadioMode starts infinite radio mode
-func StartRadioMode(bot *MusicBot, session *discordgo.Session, seed, channelID string) {
-	bot.RadioMu.Lock()
-	bot.RadioEnabled = true
-	bot.RadioSeed = seed
-	bot.RadioChannelID = channelID
-	bot.RadioMu.Unlock()
-
-	// Generate initial playlist
-	queries := GeneratePlaylistQueries(seed)
-	maxDurationSeconds := 420
-
-	for _, queryStr := range queries {
-		song := SearchYouTube(queryStr, "Radio")
-		if song.Title != "" && IsSongDurationUnderLimit(song.Duration, maxDurationSeconds) {
-			if !bot.IsInRadioHistory(song.URL) {
-				bot.Playlist.Lock()
-				bot.Playlist.Songs = append(bot.Playlist.Songs, song)
-				bot.Playlist.Unlock()
-				bot.AddToRadioHistory(song.URL)
-			}
-		}
-	}
-
-	// Start playback if not already playing
-	bot.Mu.Lock()
-	if !bot.IsPlaying {
-		bot.Mu.Unlock()
-		go PlayQueue(bot, session, channelID)
-	} else {
-		bot.Mu.Unlock()
-	}
-}

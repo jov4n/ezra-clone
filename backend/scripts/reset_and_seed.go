@@ -31,13 +31,14 @@ func main() {
 
 	// Warning prompt
 	if !*skipConfirm {
-		fmt.Println("⚠️  WARNING: This will DELETE ALL DATA from Neo4j!")
-		fmt.Println("This action cannot be undone.")
+		log.Warn("⚠️  WARNING: This will DELETE ALL DATA from Neo4j!")
+		log.Warn("This action cannot be undone.")
+		// Use fmt.Print for user input prompt (needs to go to stdout)
 		fmt.Print("Are you sure you want to continue? (yes/no): ")
 		var response string
 		fmt.Scanln(&response)
 		if response != "yes" && response != "y" {
-			fmt.Println("Aborted.")
+			log.Info("Aborted.")
 			os.Exit(0)
 		}
 	}

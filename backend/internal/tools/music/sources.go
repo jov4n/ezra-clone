@@ -3,6 +3,7 @@ package music
 import (
 	"context"
 
+	"ezra-clone/backend/internal/adapter"
 	"ezra-clone/backend/internal/tools/music/sources"
 )
 
@@ -78,17 +79,12 @@ func FetchSoundCloudPlaylist(ctx context.Context, soundcloudURL, requester strin
 }
 
 // GeneratePlaylistQueries wraps sources.GeneratePlaylistQueries
-func GeneratePlaylistQueries(query string) []string {
-	return sources.GeneratePlaylistQueries(query)
+func GeneratePlaylistQueries(ctx context.Context, llmAdapter *adapter.LLMAdapter, query string) []string {
+	return sources.GeneratePlaylistQueries(ctx, llmAdapter, query)
 }
 
 // GenerateRadioSuggestions wraps sources.GenerateRadioSuggestions
-func GenerateRadioSuggestions(seed string, recentSongs []string) []string {
-	return sources.GenerateRadioSuggestions(seed, recentSongs)
-}
-
-// SetOpenRouterAPIKey sets the OpenRouter API key for playlist generation
-func SetOpenRouterAPIKey(key string) {
-	sources.SetOpenRouterAPIKey(key)
+func GenerateRadioSuggestions(ctx context.Context, llmAdapter *adapter.LLMAdapter, seed string, recentSongs []string) []string {
+	return sources.GenerateRadioSuggestions(ctx, llmAdapter, seed, recentSongs)
 }
 

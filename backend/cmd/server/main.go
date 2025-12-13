@@ -58,6 +58,9 @@ func main() {
 	llmAdapter := adapter.NewLLMAdapter(cfg.LiteLLMURL, cfg.OpenRouterAPIKey, cfg.ModelID)
 	agentOrch := agent.NewOrchestrator(graphRepo, llmAdapter)
 	
+	// Set LLM adapter for website summarization (uses LiteLLM)
+	agentOrch.SetLLMAdapterForTools(llmAdapter)
+	
 	// Initialize ComfyUI executor (always initialize for prompt enhancement, RunPod optional for image generation)
 	comfyExecutor := tools.NewComfyExecutor(llmAdapter, cfg)
 	agentOrch.SetComfyExecutor(comfyExecutor)

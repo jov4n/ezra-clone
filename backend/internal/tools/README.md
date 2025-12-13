@@ -8,7 +8,6 @@ The tools package is organized as follows:
 
 ```
 internal/tools/
-├── registry.go              # Tool registry (future organization point)
 ├── tools.go                 # All tool definitions (GetMemoryTools, GetDiscordTools, etc.)
 ├── executor_core.go         # Core executor types and ExecutionContext
 ├── executor.go              # Main executor routing logic
@@ -108,7 +107,6 @@ For better maintainability, consider organizing into subdirectories:
 
 ```
 internal/tools/
-├── registry.go
 ├── executor.go
 ├── executor_core.go
 ├── memory/

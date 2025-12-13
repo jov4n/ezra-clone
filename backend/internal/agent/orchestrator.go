@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,21 +25,24 @@ var (
 
 // Orchestrator manages the agent's reasoning and action loop
 type Orchestrator struct {
-	graphRepo       *graph.Repository
-	llm             *adapter.LLMAdapter
-	toolExecutor    *tools.Executor
-	memoryEvaluator *MemoryEvaluator
-	logger          *zap.Logger
+	graphRepo         *graph.Repository
+	llm               *adapter.LLMAdapter
+	toolExecutor      *tools.Executor
+	memoryEvaluator   *MemoryEvaluator
+	toolResultProc    *ToolResultProcessor
+	logger            *zap.Logger
 }
 
 // NewOrchestrator creates a new agent orchestrator
 func NewOrchestrator(graphRepo *graph.Repository, llm *adapter.LLMAdapter) *Orchestrator {
+	log := logger.Get()
 	return &Orchestrator{
 		graphRepo:       graphRepo,
 		llm:             llm,
 		toolExecutor:    tools.NewExecutor(graphRepo),
 		memoryEvaluator: NewMemoryEvaluator(llm, graphRepo),
-		logger:          logger.Get(),
+		toolResultProc:  NewToolResultProcessor(log),
+		logger:          log,
 	}
 }
 
@@ -60,6 +64,16 @@ func (o *Orchestrator) SetMusicExecutor(me *tools.MusicExecutor) {
 // SetMimicBackgroundTask sets the background task manager for mimic mode
 func (o *Orchestrator) SetMimicBackgroundTask(task *tools.MimicBackgroundTask) {
 	o.toolExecutor.SetMimicBackgroundTask(task)
+}
+
+// SetSystemExecutor sets the system executor for system control tools
+func (o *Orchestrator) SetSystemExecutor(se *tools.SystemExecutor) {
+	o.toolExecutor.SetSystemExecutor(se)
+}
+
+// SetLLMAdapterForTools sets the LLM adapter for tools that need it (like website summarization)
+func (o *Orchestrator) SetLLMAdapterForTools(llmAdapter *adapter.LLMAdapter) {
+	o.toolExecutor.SetLLMAdapter(llmAdapter)
 }
 
 // GetToolExecutor returns the tool executor (for background tasks)
@@ -113,11 +127,11 @@ func (o *Orchestrator) RunTurnWithContext(ctx context.Context, agentID, userID, 
 
 // runTurnRecursive executes a turn with recursion tracking
 func (o *Orchestrator) runTurnRecursive(ctx context.Context, execCtx *tools.ExecutionContext, message string, depth int) (*TurnResult, error) {
-	return o.runTurnRecursiveWithImage(ctx, execCtx, message, depth, nil, "", nil)
+	return o.runTurnRecursiveWithImage(ctx, execCtx, message, depth, nil, "", nil, nil)
 }
 
 // runTurnRecursiveWithImage executes a turn with recursion tracking and preserves image data
-func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *tools.ExecutionContext, message string, depth int, preservedImageData []byte, preservedImageName string, preservedImageMeta map[string]interface{}) (*TurnResult, error) {
+func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *tools.ExecutionContext, message string, depth int, preservedImageData []byte, preservedImageName string, preservedImageMeta map[string]interface{}, preservedFetchedURLs []string) (*TurnResult, error) {
 	if depth >= constants.MaxRecursionDepth {
 		return nil, ErrMaxRecursion
 	}
@@ -201,102 +215,136 @@ func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *t
 	// 6. Act - Execute tool calls
 	var toolResults []string
 	var embeds []Embed
-	// Start with preserved image data from previous turns
-	imageData := preservedImageData
-	imageName := preservedImageName
-	imageMeta := preservedImageMeta
-	if imageMeta == nil {
-		imageMeta = make(map[string]interface{})
-	}
+	var fetchWebpageCount int
+	var imageData []byte
+	var imageName string
+	var imageMeta map[string]interface{}
+	var fetchedURLs []string
+
 	if len(llmResponse.ToolCalls) > 0 {
-		for _, toolCall := range llmResponse.ToolCalls {
-			result := o.toolExecutor.Execute(ctx, execCtx, toolCall)
+		toolResults, imageData, imageName, imageMeta, fetchedURLs, embeds, fetchWebpageCount = o.toolResultProc.ProcessToolResults(
+			ctx,
+			llmResponse.ToolCalls,
+			execCtx,
+			o.toolExecutor,
+			llmResponse,
+			preservedImageData,
+			preservedImageName,
+			preservedImageMeta,
+			preservedFetchedURLs,
+		)
 
-			if result.Success {
-				o.logger.Info("Tool executed successfully",
-					zap.String("tool", toolCall.Name),
-					zap.String("message", result.Message),
-				)
-
-				// Capture tool results for context
-				if result.Message != "" {
-					toolResults = append(toolResults, fmt.Sprintf("[%s]: %s", toolCall.Name, result.Message))
+		// Check if user asked for multiple articles but we only fetched one
+		messageLower := strings.ToLower(message)
+		requestedMultipleArticles := strings.Contains(messageLower, "summarize") && 
+			(strings.Contains(messageLower, "article") || strings.Contains(messageLower, "result") || strings.Contains(messageLower, "first") || strings.Contains(messageLower, "most interesting"))
+		
+		numArticlesRequested := 2 // default
+		// Detect number of articles requested
+		if strings.Contains(messageLower, "first 2") || strings.Contains(messageLower, "2 articles") || strings.Contains(messageLower, "2 most") {
+			numArticlesRequested = 2
+		} else if strings.Contains(messageLower, "first 3") || strings.Contains(messageLower, "3 articles") || strings.Contains(messageLower, "3 most") {
+			numArticlesRequested = 3
+		} else if strings.Contains(messageLower, "first 4") || strings.Contains(messageLower, "4 articles") || strings.Contains(messageLower, "4 most") {
+			numArticlesRequested = 4
+		} else if strings.Contains(messageLower, "first") || strings.Contains(messageLower, "most interesting") {
+			numArticlesRequested = 2
+		}
+		
+		// If we have tool results but no content, and haven't hit max depth, recurse WITH tool context
+		shouldRecurse := llmResponse.Content == "" && depth < constants.MaxRecursionDepth-1 && len(toolResults) > 0
+		
+		// Also recurse if user asked for multiple articles but we haven't fetched enough yet
+		// BUT: if we have enough articles, STOP recursing and force summarization
+		if requestedMultipleArticles {
+			if fetchWebpageCount < numArticlesRequested && depth < constants.MaxRecursionDepth-1 {
+				// Need more articles - force recursion
+				shouldRecurse = true
+				// Add instruction about needing more articles
+				if len(toolResults) == 0 {
+					toolResults = append(toolResults, "[Status]: Need to fetch more articles")
 				}
-
-				// Check for image data from image generation tool
-				if toolCall.Name == tools.ToolGenerateImageWithRunPod && result.Data != nil {
-					if dataMap, ok := result.Data.(map[string]interface{}); ok {
-						if imgData, ok := dataMap["image_data"].([]byte); ok && len(imgData) > 0 {
-							imageData = imgData
-							if format, ok := dataMap["image_format"].(string); ok {
-								imageName = fmt.Sprintf("image.%s", format)
-							} else {
-								imageName = "image.png"
-							}
-							
-							// Extract metadata for embed
-							imageMeta = make(map[string]interface{})
-							if seed, ok := dataMap["seed"]; ok {
-								imageMeta["seed"] = seed
-							}
-							if width, ok := dataMap["width"]; ok {
-								imageMeta["width"] = width
-							}
-							if height, ok := dataMap["height"]; ok {
-								imageMeta["height"] = height
-							}
-							if workflow, ok := dataMap["workflow"]; ok {
-								imageMeta["workflow"] = workflow
-							}
-							if elapsed, ok := dataMap["elapsed_seconds"]; ok {
-								imageMeta["elapsed_seconds"] = elapsed
-							}
-							
-							o.logger.Debug("Captured image data from tool result",
-								zap.Int("image_size", len(imageData)),
-								zap.String("image_name", imageName),
-							)
-						}
-					}
+			} else if fetchWebpageCount >= numArticlesRequested {
+				// We have enough articles - STOP fetching, only recurse if we need to summarize
+				// Don't recurse if we already have content (LLM already responded)
+				if llmResponse.Content == "" {
+					// No content yet, recurse once more to get summary
+					shouldRecurse = true
+				} else {
+					// We have content, don't recurse
+					shouldRecurse = false
 				}
-
-				// For informational tools, use result data to build response and embeds
-				if isInformationalTool(toolCall.Name) && result.Data != nil {
-					response, toolEmbeds := formatToolResponseWithEmbeds(toolCall.Name, result)
-					if response != "" && llmResponse.Content == "" {
-						llmResponse.Content = response
-					}
-					if len(toolEmbeds) > 0 {
-						embeds = append(embeds, toolEmbeds...)
-					}
-				}
-
-				// If send_message tool was used, capture the message as content
-				if toolCall.Name == tools.ToolSendMessage && result.Message != "" {
-					if llmResponse.Content == "" {
-						llmResponse.Content = result.Message
-					}
-				}
-			} else {
-				o.logger.Warn("Tool execution failed",
-					zap.String("tool", toolCall.Name),
-					zap.String("error", result.Error),
-				)
-				toolResults = append(toolResults, fmt.Sprintf("[%s] ERROR: %s", toolCall.Name, result.Error))
 			}
 		}
-
-		// If we have tool results but no content, and haven't hit max depth, recurse WITH tool context
-		if llmResponse.Content == "" && depth < constants.MaxRecursionDepth-1 && len(toolResults) > 0 {
+		
+		if shouldRecurse {
 			// Include tool results in the next message so LLM knows what happened
+			// Add a summary of fetched URLs at the top for clarity
+			toolResultsWithSummary := make([]string, 0)
+			if len(fetchedURLs) > 0 {
+				toolResultsWithSummary = append(toolResultsWithSummary, fmt.Sprintf("[SUMMARY]: You have already fetched %d article(s):", len(fetchedURLs)))
+				for i, url := range fetchedURLs {
+					toolResultsWithSummary = append(toolResultsWithSummary, fmt.Sprintf("  Article %d: %s", i+1, url))
+				}
+				toolResultsWithSummary = append(toolResultsWithSummary, "")
+			}
+			toolResultsWithSummary = append(toolResultsWithSummary, toolResults...)
+			
 			contextMessage := fmt.Sprintf("%s\n\n[Tool Results]:\n%s\n\nNow provide a helpful response to the user based on these results.",
-				message, strings.Join(toolResults, "\n"))
+				message, strings.Join(toolResultsWithSummary, "\n"))
+			
+			// If user asked to summarize articles, add explicit instruction
+			if requestedMultipleArticles {
+				if fetchWebpageCount < numArticlesRequested {
+					contextMessage += fmt.Sprintf("\n\nCRITICAL: You have only fetched %d article(s), but the user asked for %d articles. ", fetchWebpageCount, numArticlesRequested)
+					contextMessage += fmt.Sprintf("You MUST call fetch_webpage %d more time(s) to fetch DIFFERENT articles.\n", numArticlesRequested-fetchWebpageCount)
+					
+					// List already fetched URLs to prevent duplicates - make it VERY explicit
+					if len(fetchedURLs) > 0 {
+						contextMessage += fmt.Sprintf("\n🚫 ALREADY FETCHED URLs - DO NOT FETCH THESE AGAIN:\n")
+						for i, url := range fetchedURLs {
+							contextMessage += fmt.Sprintf("  %d. %s\n", i+1, url)
+						}
+						contextMessage += fmt.Sprintf("\n⚠️ WARNING: If you fetch any of these URLs again, you will waste tokens and not get new information!\n")
+					}
+					
+					contextMessage += fmt.Sprintf("\nCRITICAL INSTRUCTIONS - READ CAREFULLY:\n")
+					contextMessage += fmt.Sprintf("- The user asked to summarize %d ARTICLES\n", numArticlesRequested)
+					contextMessage += fmt.Sprintf("- You have already fetched %d article(s)\n", fetchWebpageCount)
+					contextMessage += fmt.Sprintf("- You need to fetch %d MORE DIFFERENT article(s)\n", numArticlesRequested-fetchWebpageCount)
+					contextMessage += fmt.Sprintf("- Use the ARTICLE URLs from the search results above (the URLs listed under 'ARTICLE 1', 'ARTICLE 2', etc.)\n")
+					contextMessage += fmt.Sprintf("- BEFORE calling fetch_webpage, check the 'ALREADY FETCHED URLs' list above\n")
+					contextMessage += fmt.Sprintf("- The URL you fetch MUST be DIFFERENT from all URLs in that list\n")
+					contextMessage += "- DO NOT fetch the search results page URL (html.duckduckgo.com)\n"
+					contextMessage += "- DO NOT fetch URLs that contain 'duckduckgo.com', 'search', or look like article list pages\n"
+					contextMessage += "- DO NOT fetch URLs ending in '/ai-news-december-2025', '/monthly-digest', '/in-depth-and-concise', or similar list/digest pages\n"
+					contextMessage += "- DO NOT fetch URLs that are article collections, digests, or roundups\n"
+					contextMessage += fmt.Sprintf("- You need to fetch ARTICLE %d URL (use fetch_webpage with that URL - make sure it's DIFFERENT from URLs already fetched)\n", fetchWebpageCount+1)
+					if numArticlesRequested > fetchWebpageCount+1 {
+						contextMessage += fmt.Sprintf("- Then fetch ARTICLE %d URL (use fetch_webpage again with that URL - also DIFFERENT)\n", fetchWebpageCount+2)
+					}
+				} else {
+					// We have enough articles - STRONGLY instruct to summarize and STOP fetching
+					contextMessage += fmt.Sprintf("\n\n✅ SUCCESS: You have fetched %d article(s) as requested. ", fetchWebpageCount)
+					contextMessage += fmt.Sprintf("You MUST NOW PROVIDE A SUMMARY - DO NOT FETCH ANY MORE ARTICLES.\n\n")
+					contextMessage += fmt.Sprintf("CRITICAL INSTRUCTIONS:\n")
+					contextMessage += fmt.Sprintf("1. You have all the article content you need in the tool results above\n")
+					contextMessage += fmt.Sprintf("2. DO NOT call fetch_webpage again - you already have %d articles\n", fetchWebpageCount)
+					contextMessage += fmt.Sprintf("3. DO NOT call web_search again\n")
+					contextMessage += fmt.Sprintf("4. You MUST provide a well-formatted summary that:\n")
+					contextMessage += fmt.Sprintf("   - Summarizes each of the %d articles you fetched\n", numArticlesRequested)
+					contextMessage += fmt.Sprintf("   - Highlights the key points from each article\n")
+					contextMessage += fmt.Sprintf("   - Formats the summary nicely with clear sections\n")
+					contextMessage += fmt.Sprintf("   - Uses the send_message tool to send the summary to the user\n")
+					contextMessage += fmt.Sprintf("5. Your response should be a complete, formatted summary - not just raw content\n")
+				}
+			}
 			o.logger.Debug("Recursing with tool context",
 				zap.Int("new_depth", depth+1),
 				zap.Int("tool_results", len(toolResults)),
 			)
 			// Preserve image data through recursive call
-			return o.runTurnRecursiveWithImage(ctx, execCtx, contextMessage, depth+1, imageData, imageName, imageMeta)
+			return o.runTurnRecursiveWithImage(ctx, execCtx, contextMessage, depth+1, imageData, imageName, imageMeta, fetchedURLs)
 		}
 
 		// Default response if we hit max depth without content
@@ -349,17 +397,73 @@ func (o *Orchestrator) runTurnRecursiveWithImage(ctx context.Context, execCtx *t
 	}()
 
 	// Build result with any embeds
-	turnResult := &TurnResult{
-		Content:   llmResponse.Content,
-		ToolCalls: llmResponse.ToolCalls,
-		Ignored:   false,
-		Embeds:    embeds,
-		ImageData: imageData,
-		ImageName: imageName,
-		ImageMeta: imageMeta,
-	}
+	turnResult := BuildTurnResult(llmResponse, embeds, imageData, imageName, imageMeta)
 
 	return turnResult, nil
+}
+
+// smartChunkContent intelligently splits content into chunks at natural boundaries
+// It tries to split at paragraph breaks first, then sentence breaks, avoiding mid-word splits
+func smartChunkContent(content string, maxChunkSize int) []string {
+	if len(content) <= maxChunkSize {
+		return []string{content}
+	}
+
+	var chunks []string
+	remaining := content
+
+	for len(remaining) > maxChunkSize {
+		// Try to find a good split point
+		chunk := remaining[:maxChunkSize]
+		
+		// First, try to split at a paragraph break (double newline)
+		if idx := strings.LastIndex(chunk, "\n\n"); idx > maxChunkSize*3/4 {
+			chunks = append(chunks, remaining[:idx+2])
+			remaining = strings.TrimSpace(remaining[idx+2:])
+			continue
+		}
+		
+		// Then try to split at a single newline (paragraph end)
+		if idx := strings.LastIndex(chunk, "\n"); idx > maxChunkSize*3/4 {
+			chunks = append(chunks, remaining[:idx+1])
+			remaining = strings.TrimSpace(remaining[idx+1:])
+			continue
+		}
+		
+		// Try to split at sentence boundaries (period, exclamation, question mark followed by space)
+		sentenceEnd := regexp.MustCompile(`[.!?]\s+`)
+		matches := sentenceEnd.FindAllStringIndex(chunk, -1)
+		if len(matches) > 0 {
+			// Use the last sentence boundary that's in the last quarter of the chunk
+			for i := len(matches) - 1; i >= 0; i-- {
+				idx := matches[i][1]
+				if idx > maxChunkSize*3/4 {
+					chunks = append(chunks, remaining[:idx])
+					remaining = strings.TrimSpace(remaining[idx:])
+					goto nextChunk
+				}
+			}
+		}
+		
+		// Last resort: split at word boundary (space)
+		if idx := strings.LastIndex(chunk, " "); idx > maxChunkSize*2/3 {
+			chunks = append(chunks, remaining[:idx])
+			remaining = strings.TrimSpace(remaining[idx:])
+		} else {
+			// No good split point, force split (shouldn't happen often)
+			chunks = append(chunks, remaining[:maxChunkSize])
+			remaining = remaining[maxChunkSize:]
+		}
+		
+	nextChunk:
+		continue
+	}
+
+	if len(remaining) > 0 {
+		chunks = append(chunks, remaining)
+	}
+
+	return chunks
 }
 
 // buildSystemPrompt is defined in prompt_builder.go

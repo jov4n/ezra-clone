@@ -9,6 +9,7 @@ import (
 	"ezra-clone/backend/internal/adapter"
 	"ezra-clone/backend/internal/graph"
 	"ezra-clone/backend/pkg/logger"
+
 	"go.uber.org/zap"
 )
 
@@ -30,9 +31,9 @@ type ToolResult struct {
 
 // MimicState holds the current personality mimic state
 type MimicState struct {
-	Active           bool                `json:"active"`
-	OriginalPersonality string           `json:"original_personality"`
-	MimicProfile     *PersonalityProfile `json:"mimic_profile,omitempty"`
+	Active              bool                `json:"active"`
+	OriginalPersonality string              `json:"original_personality"`
+	MimicProfile        *PersonalityProfile `json:"mimic_profile,omitempty"`
 }
 
 // Executor handles tool execution
@@ -43,8 +44,10 @@ type Executor struct {
 	discordExecutor     *DiscordExecutor
 	comfyExecutor       *ComfyExecutor
 	musicExecutor       *MusicExecutor
+	systemExecutor      *SystemExecutor
 	mimicStates         map[string]*MimicState // key: agentID
 	mimicBackgroundTask *MimicBackgroundTask
+	llmAdapter          *adapter.LLMAdapter // LLM adapter for summarization via LiteLLM
 }
 
 // NewExecutor creates a new tool executor
@@ -77,6 +80,16 @@ func (e *Executor) SetMusicExecutor(me *MusicExecutor) {
 // SetMimicBackgroundTask sets the background task manager for mimic mode
 func (e *Executor) SetMimicBackgroundTask(task *MimicBackgroundTask) {
 	e.mimicBackgroundTask = task
+}
+
+// SetSystemExecutor sets the system executor for system control tools
+func (e *Executor) SetSystemExecutor(se *SystemExecutor) {
+	e.systemExecutor = se
+}
+
+// SetLLMAdapter sets the LLM adapter for website summarization
+func (e *Executor) SetLLMAdapter(llmAdapter *adapter.LLMAdapter) {
+	e.llmAdapter = llmAdapter
 }
 
 // GetMimicState returns the current mimic state for an agent
@@ -145,6 +158,8 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 		return e.executeWebSearch(ctx, toolCall.Arguments)
 	case ToolFetchWebpage:
 		return e.executeFetchWebpage(ctx, toolCall.Arguments)
+	case ToolSummarizeWebsite:
+		return e.executeSummarizeWebsite(ctx, toolCall.Arguments)
 
 	// GitHub Tools
 	case ToolGitHubRepoInfo:
@@ -186,8 +201,12 @@ func (e *Executor) Execute(ctx context.Context, execCtx *ExecutionContext, toolC
 
 	// Music Tools
 	case ToolMusicPlay, ToolMusicPlaylist, ToolMusicQueue, ToolMusicSkip,
-		ToolMusicPause, ToolMusicResume, ToolMusicStop, ToolMusicVolume, ToolMusicRadio:
+		ToolMusicPause, ToolMusicResume, ToolMusicStop, ToolMusicVolume, ToolMusicRadio, ToolMusicDisconnect:
 		return e.executeMusicTool(ctx, execCtx, toolCall)
+
+	// System Tools
+	case ToolBotShutdown:
+		return e.executeSystemTool(ctx, execCtx, toolCall)
 
 	default:
 		e.logger.Warn("Unknown tool", zap.String("tool", toolCall.Name))
@@ -216,3 +235,20 @@ func (e *Executor) executeMusicTool(ctx context.Context, execCtx *ExecutionConte
 	return e.musicExecutor.ExecuteMusicTool(ctx, execCtx, toolCall.Name, args)
 }
 
+// executeSystemTool executes a system-related tool
+func (e *Executor) executeSystemTool(ctx context.Context, execCtx *ExecutionContext, toolCall adapter.ToolCall) *ToolResult {
+	if e.systemExecutor == nil {
+		return &ToolResult{
+			Success: false,
+			Error:   "System executor not initialized",
+		}
+	}
+
+	// Parse arguments - Arguments is already a map[string]interface{}
+	args := make(map[string]interface{})
+	if toolCall.Arguments != nil {
+		args = toolCall.Arguments
+	}
+
+	return e.systemExecutor.ExecuteSystemTool(ctx, execCtx, toolCall.Name, args)
+}
